@@ -1,47 +1,70 @@
 """
 Comprueba, uno por uno, si el enlace de vídeo (stream_url) de cada canal
-de la tabla bt_channels responde de verdad.
+de la tabla bt_channels responde de verdad, y BORRA PARA SIEMPRE de la
+base de datos (sin dejar rastro, no solo ocultos):
 
-- Los canales que fallan se marcan como "is_broken = true": desaparecen
-  solos de la aplicación de la tele, PERO NUNCA se borran de la base de
-  datos.
-- Los canales que estaban marcados como caídos y ahora vuelven a
-  responder, se reactivan solos ("is_broken = false"), sin que nadie
-  tenga que hacerlo a mano desde el panel de administración.
+  - los canales que fallan dos veces seguidas (con una pequeña espera
+    entre intento e intento, por si ha sido solo un corte de red
+    pasajero y no un canal de verdad muerto)
+  - los canales duplicados: cuando dos o más filas tienen exactamente
+    el mismo enlace de vídeo, solo se queda una (la que tiene número
+    de canal asignado, o si no la más antigua) y se borran las demás
 
-Es la misma comprobación que ya hace el botón "Comprobar canales" del
-panel de administración, pero hecha desde un ordenador de GitHub en vez
-de desde el navegador — así no depende de que alguien lo pulse, no se
-bloquea por CORS, y puede comprobar los más de 4000 canales en paralelo
-en vez de uno detrás de otro.
+IMPORTANTE — por qué antes "no funcionaba de verdad":
+Cuando se protegieron las tablas de Supabase con seguridad a nivel de
+fila (RLS), se dejó que solo una cuenta de administrador identificada
+pudiera leer y escribir en bt_channels. Este script, en cambio, se
+conectaba con la "anon key" (la clave pública, la misma que lleva la
+aplicación de la tele dentro), que desde ese cambio de seguridad ya NO
+cuenta como administrador — así que Supabase respondía "todo bien"
+(HTTP 200) pero en realidad no tocaba ni una fila. Por eso los canales
+caídos se quedaban ahí para siempre, aunque en la pantalla pareciera
+que el sistema funcionaba.
+
+La solución es usar aquí la "service_role key": una clave secreta de
+Supabase que se salta esa protección (por eso NUNCA debe ir dentro de
+la aplicación ni subirse a GitHub en un archivo normal — solo vive
+como un "secreto" del repositorio, ver check-channels.yml).
 """
 
 import asyncio
+import datetime
 import os
 import sys
 
 import aiohttp
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://oansihwqjcfjackfhgbd.supabase.co").rstrip("/")
-SUPABASE_ANON_KEY = os.environ.get(
-    "SUPABASE_ANON_KEY", "sb_publishable_tn7CCQaV5otb7w5nKVdGgQ_uhOQCvwa"
-)
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
 CONCURRENCY = 50
 REQUEST_TIMEOUT_SECONDS = 10
 PAGE_SIZE = 1000
+SEGUNDA_ESPERA_SEGUNDOS = 3  # pausa antes del segundo intento, por si el corte era pasajero
+
+
+def _now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _headers():
+    return {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+    }
 
 
 async def fetch_all_channels(session):
-    """Trae TODOS los canales (estén caídos o no), en tandas de 1000,
-    igual que hace la propia app de la tele."""
+    """Trae TODOS los canales, en tandas de 1000."""
     channels = []
     offset = 0
     while True:
-        url = f"{SUPABASE_URL}/rest/v1/bt_channels?select=id,name,stream_url,is_broken"
+        url = (
+            f"{SUPABASE_URL}/rest/v1/bt_channels"
+            "?select=id,name,stream_url,channel_number,is_broken"
+        )
         headers = {
-            "apikey": SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+            **_headers(),
             "Range-Unit": "items",
             "Range": f"{offset}-{offset + PAGE_SIZE - 1}",
         }
@@ -55,10 +78,34 @@ async def fetch_all_channels(session):
     return channels
 
 
+def find_duplicates(channels):
+    """Agrupa los canales por su enlace de vídeo (normalizado: sin
+    espacios ni mayúsculas/minúsculas). De cada grupo con más de un
+    canal, se queda con uno solo (el que tenga número de canal
+    asignado; si ninguno lo tiene, el más antiguo por id) y devuelve
+    los ids de los demás, que son duplicados de verdad y se pueden
+    borrar sin miedo."""
+    groups = {}
+    for ch in channels:
+        key = (ch.get("stream_url") or "").strip().lower()
+        if not key:
+            continue
+        groups.setdefault(key, []).append(ch)
+
+    duplicate_ids = []
+    for key, group in groups.items():
+        if len(group) < 2:
+            continue
+        group_sorted = sorted(group, key=lambda c: (c.get("channel_number") is None, c["id"]))
+        # group_sorted[0] es el que se queda; el resto se borra.
+        duplicate_ids.extend(c["id"] for c in group_sorted[1:])
+    return duplicate_ids
+
+
 async def check_one(session, sem, channel):
     """Devuelve True si el canal responde bien, False si no. Se hace un
-    segundo intento antes de dar un canal por caído, por si ha sido solo
-    un corte momentáneo de la red."""
+    segundo intento (con una pequeña espera) antes de dar un canal por
+    caído de verdad, por si ha sido solo un corte momentáneo."""
     url = (channel.get("stream_url") or "").strip()
     if not url.startswith("http"):
         return False
@@ -74,76 +121,102 @@ async def check_one(session, sem, channel):
     async with sem:
         if await attempt():
             return True
+
+    await asyncio.sleep(SEGUNDA_ESPERA_SEGUNDOS)
+
     async with sem:
         return await attempt()
 
 
-async def apply_update(session, sem, channel_id, is_broken):
-    url = f"{SUPABASE_URL}/rest/v1/bt_channels?id=eq.{channel_id}"
-    headers = {
-        "apikey": SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=minimal",
-    }
-    payload = {"is_broken": is_broken, "last_checked_at": _now_iso()}
-    async with sem:
-        async with session.patch(url, headers=headers, json=payload) as resp:
-            if resp.status not in (200, 204):
-                body = await resp.text()
-                print(f"  ! No se pudo actualizar el canal {channel_id}: HTTP {resp.status} — {body}")
+async def delete_channels(session, sem, ids, motivo):
+    """Borra canales PARA SIEMPRE de la base de datos — no los oculta,
+    los elimina de verdad, sin dejar rastro."""
+    if not ids:
+        return
+
+    async def delete_one(cid):
+        url = f"{SUPABASE_URL}/rest/v1/bt_channels?id=eq.{cid}"
+        async with sem:
+            async with session.delete(url, headers=_headers()) as resp:
+                if resp.status not in (200, 204):
+                    body = await resp.text()
+                    print(f"  ! No se pudo borrar el canal {cid}: HTTP {resp.status} — {body}")
+
+    await asyncio.gather(*(delete_one(cid) for cid in ids))
+    print(f"Borrados para siempre ({motivo}): {len(ids)}")
 
 
-def _now_iso():
-    import datetime
+async def mark_checked(session, sem, ids):
+    """A los canales que SÍ funcionan se les anota la fecha de la
+    última comprobación, para el aviso del panel de administración."""
+    if not ids:
+        return
 
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    async def touch(cid):
+        url = f"{SUPABASE_URL}/rest/v1/bt_channels?id=eq.{cid}"
+        headers = {**_headers(), "Content-Type": "application/json", "Prefer": "return=minimal"}
+        payload = {"is_broken": False, "last_checked_at": _now_iso()}
+        async with sem:
+            async with session.patch(url, headers=headers, json=payload) as resp:
+                if resp.status not in (200, 204):
+                    body = await resp.text()
+                    print(f"  ! No se pudo actualizar el canal {cid}: HTTP {resp.status} — {body}")
+
+    await asyncio.gather(*(touch(cid) for cid in ids))
 
 
 async def main():
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        print(
+            "Falta la variable SUPABASE_SERVICE_ROLE_KEY. Sin ella (guardada como "
+            "secreto del repositorio en GitHub), este script no tiene permiso real "
+            "para borrar ni actualizar nada en Supabase — solo podría leer, y ni eso "
+            "si la lectura también está protegida."
+        )
+        sys.exit(1)
+
     connector = aiohttp.TCPConnector(limit=CONCURRENCY)
     async with aiohttp.ClientSession(connector=connector) as session:
         print("Descargando la lista completa de canales…")
         channels = await fetch_all_channels(session)
-        print(f"Se van a comprobar {len(channels)} canales…")
+        print(f"Canales encontrados en la base de datos: {len(channels)}")
 
         sem = asyncio.Semaphore(CONCURRENCY)
+
+        # 1) Duplicados exactos (mismo enlace de vídeo) — se borran ya,
+        # antes incluso de comprobar si funcionan, porque son sobrantes
+        # sin más.
+        duplicate_ids = find_duplicates(channels)
+        if duplicate_ids:
+            print(f"\nCanales duplicados encontrados: {len(duplicate_ids)}")
+            await delete_channels(session, sem, duplicate_ids, "duplicados")
+            dup_set = set(duplicate_ids)
+            channels = [c for c in channels if c["id"] not in dup_set]
+        else:
+            print("\nNo se han encontrado canales duplicados.")
+
+        # 2) Comprobar de verdad si cada canal restante funciona.
+        print(f"\nComprobando si funcionan de verdad {len(channels)} canales…")
         results = await asyncio.gather(*(check_one(session, sem, ch) for ch in channels))
 
-        newly_hidden = []
-        recovered = []
-        for channel, is_alive in zip(channels, results):
-            was_broken = bool(channel.get("is_broken"))
-            if is_alive and was_broken:
-                recovered.append(channel)
-            elif not is_alive and not was_broken:
-                newly_hidden.append(channel)
+        dead = [ch for ch, alive in zip(channels, results) if not alive]
+        alive_ids = [ch["id"] for ch, alive in zip(channels, results) if alive]
 
-        print(f"\nCanales que dejan de funcionar y se ocultan ahora: {len(newly_hidden)}")
-        for ch in newly_hidden:
-            print(f"  - {ch.get('name')} ({ch['id']})")
+        if dead:
+            print(f"\nCanales caídos que se borran para siempre: {len(dead)}")
+            for ch in dead:
+                print(f"  - {ch.get('name')} ({ch['id']})")
+            await delete_channels(session, sem, [ch["id"] for ch in dead], "caídos")
+        else:
+            print("\nNo hay canales caídos ahora mismo.")
 
-        print(f"\nCanales que vuelven a funcionar y se reactivan: {len(recovered)}")
-        for ch in recovered:
-            print(f"  - {ch.get('name')} ({ch['id']})")
+        # 3) A los que sí funcionan, se les anota cuándo se comprobaron.
+        await mark_checked(session, sem, alive_ids)
 
-        # IMPORTANTE: se actualiza la fecha "última comprobación" de TODOS
-        # los canales, no solo de los que cambian de estado. Así, en el
-        # panel de administración se puede ver en cualquier momento cuándo
-        # fue la última vez que el sistema comprobó todo de verdad —
-        # antes no había ninguna prueba visible de que esto se hubiera
-        # ejecutado, y con miles de canales casi siempre en verde, era
-        # imposible distinguir "está bien" de "no se ha comprobado nunca".
-        updates = [(ch["id"], not is_alive) for ch, is_alive in zip(channels, results)]
-        if updates:
-            await asyncio.gather(
-                *(apply_update(session, sem, cid, broken) for cid, broken in updates)
-            )
-
-        total_broken_now = sum(1 for alive in results if not alive)
-        print(f"\nTotal de canales comprobados: {len(channels)}")
-        print(f"Total ahora mismo caídos (ocultos): {total_broken_now}")
-        print(f"Total ahora mismo funcionando: {len(channels) - total_broken_now}")
+        print("\nResumen final:")
+        print(f"  Duplicados borrados: {len(duplicate_ids)}")
+        print(f"  Caídos borrados: {len(dead)}")
+        print(f"  Funcionando de verdad ahora mismo: {len(alive_ids)}")
 
 
 if __name__ == "__main__":
