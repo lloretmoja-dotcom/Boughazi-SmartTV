@@ -37,6 +37,12 @@ class MainActivity : AppCompatActivity() {
     private var categories: List<String> = emptyList()
     private var currentIndex = -1
 
+    // Qué país/categoría se está viendo AHORA MISMO en la lista de canales
+    // (si está abierta). Sirve para poder refrescar esa lista sola cuando
+    // llegan canales nuevos o se borran caídos, sin que la persona tenga
+    // que cerrar la aplicación y volver a abrirla para verlo.
+    private var currentlyViewedCategory: String? = null
+
     private var exoPlayer: ExoPlayer? = null
     private val numberBuffer = StringBuilder()
     private val handler = Handler(Looper.getMainLooper())
@@ -49,7 +55,10 @@ class MainActivity : AppCompatActivity() {
         private const val CHANNEL_REFRESH_INTERVAL_MS = 5 * 60 * 1000L // 5 minutos
     }
 
-    private lateinit var loginSection: View
+    private lateinit var welcomeSection: View
+    private lateinit var loginPanelSection: View
+    private lateinit var signUpPanelSection: View
+    private lateinit var forgotPanelSection: View
     private lateinit var codeSection: View
     private lateinit var mainSection: View
     private lateinit var playerView: PlayerView
@@ -69,7 +78,10 @@ class MainActivity : AppCompatActivity() {
         sessionManager = SessionManager(this)
         MobileAds.initialize(this)
 
-        loginSection = findViewById(R.id.loginSection)
+        welcomeSection = findViewById(R.id.welcomeSection)
+        loginPanelSection = findViewById(R.id.loginPanelSection)
+        signUpPanelSection = findViewById(R.id.signUpPanelSection)
+        forgotPanelSection = findViewById(R.id.forgotPanelSection)
         codeSection = findViewById(R.id.codeSection)
         mainSection = findViewById(R.id.mainSection)
         playerView = findViewById(R.id.playerView)
@@ -82,13 +94,16 @@ class MainActivity : AppCompatActivity() {
         loadingText = findViewById(R.id.loadingText)
         debugInfoText = findViewById(R.id.debugInfoText)
 
-        setupLoginSection()
+        setupWelcomeSection()
+        setupLoginPanel()
+        setupSignUpPanel()
+        setupForgotPanel()
         setupCodeSection()
         setupAdBanner()
 
         val saved = sessionManager.load()
         if (saved == null) {
-            showOnly(loginSection)
+            showOnly(welcomeSection)
         } else {
             session = saved
             if (saved.hasLinkedCode) {
@@ -108,7 +123,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun setupLoginSection() {
+    /**
+     * La pantalla de bienvenida solo tiene botones. Cada uno abre su
+     * propio panel aparte, con sus propias casillas — así nunca hay
+     * dudas sobre para qué sirve cada campo.
+     */
+    private fun setupWelcomeSection() {
+        findViewById<View>(R.id.welcomeEntrarBtn).setOnClickListener {
+            showOnly(loginPanelSection)
+        }
+        findViewById<View>(R.id.welcomeCrearCuentaBtn).setOnClickListener {
+            showOnly(signUpPanelSection)
+        }
+        findViewById<View>(R.id.welcomeOlvidoBtn).setOnClickListener {
+            showOnly(forgotPanelSection)
+        }
+    }
+
+    private fun setupLoginPanel() {
         val emailField = findViewById<EditText>(R.id.loginEmail)
         val passwordField = findViewById<EditText>(R.id.loginPassword)
         val errorText = findViewById<TextView>(R.id.loginError)
@@ -128,7 +160,19 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        findViewById<View>(R.id.signUpBtn).setOnClickListener {
+        findViewById<View>(R.id.loginBackBtn).setOnClickListener {
+            passwordField.text.clear()
+            errorText.visibility = View.GONE
+            showOnly(welcomeSection)
+        }
+    }
+
+    private fun setupSignUpPanel() {
+        val emailField = findViewById<EditText>(R.id.signUpEmail)
+        val passwordField = findViewById<EditText>(R.id.signUpPassword)
+        val errorText = findViewById<TextView>(R.id.signUpError)
+
+        findViewById<View>(R.id.signUpSubmitBtn).setOnClickListener {
             val email = emailField.text.toString().trim()
             val password = passwordField.text.toString()
             if (email.isEmpty() || password.length < 6) {
@@ -143,16 +187,41 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        findViewById<View>(R.id.forgotPasswordBtn).setOnClickListener {
+        findViewById<View>(R.id.signUpBackBtn).setOnClickListener {
+            passwordField.text.clear()
+            errorText.visibility = View.GONE
+            showOnly(welcomeSection)
+        }
+    }
+
+    private fun setupForgotPanel() {
+        val emailField = findViewById<EditText>(R.id.forgotEmail)
+        val errorText = findViewById<TextView>(R.id.forgotError)
+        val statusText = findViewById<TextView>(R.id.forgotStatus)
+
+        findViewById<View>(R.id.forgotSubmitBtn).setOnClickListener {
             val email = emailField.text.toString().trim()
+            statusText.visibility = View.GONE
             if (email.isEmpty()) {
                 showError(errorText, "Escribe tu correo arriba y vuelve a tocar aquí.")
                 return@setOnClickListener
             }
             lifecycleScope.launch {
                 val result = authRepository.sendPasswordReset(email)
-                if (result is AuthResult.Failure) showError(errorText, result.message)
+                if (result is AuthResult.Failure) {
+                    showError(errorText, result.message)
+                } else {
+                    errorText.visibility = View.GONE
+                    statusText.text = "Te hemos mandado un enlace a tu correo para cambiar la contraseña."
+                    statusText.visibility = View.VISIBLE
+                }
             }
+        }
+
+        findViewById<View>(R.id.forgotBackBtn).setOnClickListener {
+            errorText.visibility = View.GONE
+            statusText.visibility = View.GONE
+            showOnly(welcomeSection)
         }
     }
 
@@ -290,6 +359,15 @@ class MainActivity : AppCompatActivity() {
                     categories.map { RowItem(title = it) }
                 ) { position -> onCategorySelected(categories[position]) }
 
+                // Si la persona tiene abierta la lista de canales de un país
+                // en este momento, la volvemos a rellenar con los datos
+                // recién traídos — así, si algún canal se ha borrado (por
+                // estar caído) o se ha añadido uno nuevo, se ve solo, sin
+                // tener que cerrar la aplicación y volver a abrirla.
+                currentlyViewedCategory
+                    ?.takeIf { it in categories && channelsList.visibility == View.VISIBLE }
+                    ?.let { onCategorySelected(it) }
+
                 currentIndex = playingId
                     ?.let { id -> allChannels.indexOfFirst { it.id == id } }
                     ?.takeIf { it >= 0 }
@@ -367,6 +445,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onCategorySelected(category: String) {
+        currentlyViewedCategory = category
         val channelsInCategory = allChannels.filter { it.category == category }
         channelsList.adapter = RowAdapter(
             channelsInCategory.mapIndexed { idx, it -> RowItem(title = "${idx + 1}  ${it.name}") }
@@ -405,6 +484,7 @@ class MainActivity : AppCompatActivity() {
     private fun hideChannelBrowser() {
         categoriesColumn.visibility = View.GONE
         channelsList.visibility = View.GONE
+        currentlyViewedCategory = null
         playerView.requestFocus()
     }
 
@@ -578,12 +658,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showOnly(view: View) {
-        loginSection.visibility = if (view == loginSection) View.VISIBLE else View.GONE
-        codeSection.visibility = if (view == codeSection) View.VISIBLE else View.GONE
-        mainSection.visibility = if (view == mainSection) View.VISIBLE else View.GONE
+        val allScreens = listOf(
+            welcomeSection, loginPanelSection, signUpPanelSection, forgotPanelSection, codeSection, mainSection
+        )
+        allScreens.forEach { it.visibility = if (it == view) View.VISIBLE else View.GONE }
         view.post {
             when (view) {
-                loginSection -> findViewById<View>(R.id.loginEmail)?.requestFocus()
+                welcomeSection -> findViewById<View>(R.id.welcomeEntrarBtn)?.requestFocus()
+                loginPanelSection -> findViewById<View>(R.id.loginEmail)?.requestFocus()
+                signUpPanelSection -> findViewById<View>(R.id.signUpEmail)?.requestFocus()
+                forgotPanelSection -> findViewById<View>(R.id.forgotEmail)?.requestFocus()
                 codeSection -> findViewById<View>(R.id.codeInput)?.requestFocus()
             }
         }
