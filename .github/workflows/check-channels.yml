@@ -23,5 +23,7 @@ jobs:
       - name: Instalar la librería necesaria
         run: pip install aiohttp
 
-      - name: Comprobar todos los canales y ocultar/reactivar los que hagan falta
+      - name: Comprobar todos los canales y borrar los caídos/duplicados para siempre
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: python scripts/check_channels.py
