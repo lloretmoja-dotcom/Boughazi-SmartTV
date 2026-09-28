@@ -31,6 +31,7 @@ import asyncio
 import datetime
 import os
 import sys
+import urllib.parse
 
 import aiohttp
 
@@ -112,54 +113,104 @@ PLAYER_USER_AGENT = "VLC/3.0.20 LibVLC/3.0.20"
 # Cuánto contenido real del enlace se descarga para comprobar que es un
 # vídeo/lista de canales de verdad, y no una página de error disfrazada
 # de "200 OK". No hace falta bajar el archivo entero.
-CONTENT_CHECK_BYTES = 4096
+CONTENT_CHECK_BYTES = 8192
 
 
-def _looks_like_real_stream(url, content_type, body_bytes):
-    """Un canal puede responder con HTTP 200 (código "todo bien") y aun
-    así no servir para nada: una página de error, un aviso de "canal no
-    disponible en tu país", una lista de reproducción vacía, etc. Esta
-    función mira el contenido de verdad para no dejarse engañar por el
-    código de estado."""
-    text_start = body_bytes[:CONTENT_CHECK_BYTES].decode("utf-8", errors="ignore").strip()
+def _es_lista_m3u(url):
+    return url.lower().split("?")[0].endswith((".m3u8", ".m3u"))
 
-    es_lista_m3u = url.lower().split("?")[0].endswith((".m3u8", ".m3u"))
-    if es_lista_m3u:
-        # Una lista de canales/segmentos de verdad SIEMPRE empieza por
-        # esta cabecera. Si no, es casi seguro una página de error o un
-        # inicio de sesión, aunque el servidor haya dicho "200 OK".
-        return text_start.upper().startswith("#EXTM3U") and len(text_start) > 15
 
-    # Para enlaces que no son .m3u8 (vídeo directo u otro formato): si
-    # el "content-type" dice que es una página web (html/json/texto
-    # normal) en vez de vídeo o audio, es casi seguro un error disfrazado.
+def _analizar_playlist(texto):
+    """Mira el contenido de una lista .m3u8 de verdad y dice si:
+      - no es una lista válida (es una página de error, un login, etc.)
+      - es una "lista maestra" que apunta a otra lista con el vídeo real
+        (devuelve esa otra dirección para seguirla)
+      - es la lista final y SÍ tiene al menos un trozo de vídeo dentro
+        (un canal "muerto" muchas veces responde con el formato correcto
+        pero totalmente vacío, sin ningún trozo de vídeo listado)
+    Devuelve una tupla: (es_valida, url_a_seguir_o_None)
+    """
+    texto = texto.strip()
+    if not texto.upper().startswith("#EXTM3U"):
+        return False, None
+
+    lineas = [l.strip() for l in texto.splitlines() if l.strip()]
+    tiene_variantes = any(l.upper().startswith("#EXT-X-STREAM-INF") for l in lineas)
+
+    # La primera línea sin "#" después de la cabecera es el siguiente
+    # paso: o bien otra lista (si es una "lista maestra"), o bien ya un
+    # trozo de vídeo de verdad.
+    siguiente = next((l for l in lineas[1:] if not l.startswith("#")), None)
+
+    if tiene_variantes:
+        # Lista maestra: solo vale si de verdad apunta a algo.
+        return (siguiente is not None), siguiente
+
+    # Lista final: solo vale si tiene al menos un trozo de vídeo listado.
+    return (siguiente is not None), None
+
+
+async def _descargar(session, url, headers):
+    """Descarga el principio de un enlace. Devuelve (ok, content_type,
+    texto_o_None) — texto_o_None es None si no se pudo leer como texto."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+        async with session.get(url, timeout=timeout, allow_redirects=True, headers=headers) as resp:
+            if not resp.ok:
+                return False, None, None
+            content_type = resp.headers.get("Content-Type", "")
+            raw = await resp.content.read(CONTENT_CHECK_BYTES)
+            texto = raw.decode("utf-8", errors="ignore")
+            return True, content_type, texto
+    except Exception:
+        return False, None, None
+
+
+async def _comprobar_contenido(session, url, headers, saltos_restantes=2):
+    """Comprueba que un enlace de verdad sirve contenido de vídeo real,
+    no solo que "conecta" (HTTP 200). Sigue una lista maestra hasta la
+    lista final si hace falta, con un límite de saltos por seguridad."""
+    ok, content_type, texto = await _descargar(session, url, headers)
+    if not ok:
+        return False
+
+    if _es_lista_m3u(url) or (texto or "").strip().upper().startswith("#EXTM3U"):
+        es_valida, url_a_seguir = _analizar_playlist(texto or "")
+        if not es_valida:
+            return False
+        if url_a_seguir:
+            if saltos_restantes <= 0:
+                return False
+            # La dirección de la siguiente lista puede venir en forma
+            # relativa ("/algo.m3u8") — hay que unirla con la dirección
+            # base para que sea una dirección completa de verdad.
+            siguiente_url = urllib.parse.urljoin(url, url_a_seguir)
+            return await _comprobar_contenido(session, siguiente_url, headers, saltos_restantes - 1)
+        return True
+
+    # Vídeo directo (no .m3u8): si el "content-type" es una página web
+    # normal en vez de vídeo/audio, es casi seguro un error disfrazado.
     content_type = (content_type or "").lower()
     if "text/html" in content_type or "application/json" in content_type:
         return False
-
-    # Y si no ha devuelto prácticamente nada de contenido, tampoco vale.
-    return len(body_bytes) > 32
+    return len(texto or "") > 32
 
 
 async def check_one(session, sem, channel):
     """Devuelve True si el canal responde bien Y de verdad sirve
-    contenido real (no una página de error disfrazada de "200 OK"). Se
-    hace un segundo intento (con una pequeña espera) antes de dar un
-    canal por caído de verdad, por si ha sido solo un corte momentáneo."""
+    contenido real (no una página de error, ni una lista vacía
+    disfrazada de "200 OK"). Se hace un segundo intento (con una
+    pequeña espera) antes de dar un canal por caído de verdad, por si
+    ha sido solo un corte momentáneo."""
     url = (channel.get("stream_url") or "").strip()
     if not url.startswith("http"):
         return False
 
+    headers = {"User-Agent": PLAYER_USER_AGENT}
+
     async def attempt():
         try:
-            timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
-            headers = {"User-Agent": PLAYER_USER_AGENT}
-            async with session.get(url, timeout=timeout, allow_redirects=True, headers=headers) as resp:
-                if not resp.ok:
-                    return False
-                content_type = resp.headers.get("Content-Type", "")
-                body = await resp.content.read(CONTENT_CHECK_BYTES)
-                return _looks_like_real_stream(url, content_type, body)
+            return await _comprobar_contenido(session, url, headers)
         except Exception:
             return False
 
