@@ -5,9 +5,9 @@
     android:layout_height="match_parent"
     android:background="@color/bg_black">
 
-    <!-- ===================== LOGIN ===================== -->
+    <!-- ===================== BIENVENIDA (solo botones) ===================== -->
     <LinearLayout
-        android:id="@+id/loginSection"
+        android:id="@+id/welcomeSection"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical"
@@ -27,13 +27,71 @@
             android:text="@string/app_name"
             android:textColor="@color/white"
             android:textSize="32sp"
-            android:textStyle="bold" />
+            android:textStyle="bold"
+            android:layout_marginBottom="32dp" />
 
-        <!-- Marca de comprobación: un número que cambia en cada versión
-             que te mando, para saber sin ninguna duda si lo que se ha
-             instalado es de verdad esta última o sigue siendo una
-             vieja. No tiene nada que ver con los canales, es solo para
-             comprobar la instalación. -->
+        <!-- Pantalla de solo botones: cada uno abre su propio panel
+             aparte (con sus propias casillas), en vez de tener el
+             correo y la contraseña compartidos a la vista de las tres
+             acciones a la vez, que podía confundir. -->
+        <Button
+            android:id="@+id/welcomeEntrarBtn"
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:text="Entrar"
+            android:textAllCaps="false"
+            android:backgroundTint="@color/accent_blue"
+            android:layout_marginBottom="8dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusDown="@id/welcomeCrearCuentaBtn" />
+
+        <Button
+            android:id="@+id/welcomeCrearCuentaBtn"
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:text="Crear cuenta nueva"
+            android:textAllCaps="false"
+            android:background="@drawable/text_button_selector"
+            android:textColor="@color/accent_orange"
+            android:layout_marginBottom="4dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusUp="@id/welcomeEntrarBtn"
+            android:nextFocusDown="@id/welcomeOlvidoBtn" />
+
+        <Button
+            android:id="@+id/welcomeOlvidoBtn"
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:text="¿Olvidaste tu contraseña?"
+            android:textAllCaps="false"
+            android:background="@drawable/text_button_selector"
+            android:textColor="@color/muted_gray"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusUp="@id/welcomeCrearCuentaBtn" />
+    </LinearLayout>
+
+    <!-- ===================== PANEL: ENTRAR ===================== -->
+    <LinearLayout
+        android:id="@+id/loginPanelSection"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="48dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Entrar"
+            android:textColor="@color/white"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="20dp" />
+
         <EditText
             android:id="@+id/loginEmail"
             android:layout_width="320dp"
@@ -76,39 +134,194 @@
             android:focusable="true"
             android:focusableInTouchMode="true"
             android:nextFocusUp="@id/loginPassword"
-            android:nextFocusDown="@id/signUpBtn" />
+            android:nextFocusDown="@id/loginBackBtn" />
 
         <Button
-            android:id="@+id/signUpBtn"
+            android:id="@+id/loginBackBtn"
             android:layout_width="320dp"
             android:layout_height="wrap_content"
-            android:text="Crear cuenta nueva"
-            android:textAllCaps="false"
-            android:background="@drawable/text_button_selector"
-            android:textColor="@color/accent_orange"
-            android:layout_marginBottom="4dp"
-            android:focusable="true"
-            android:focusableInTouchMode="true"
-            android:nextFocusUp="@id/loginSubmitBtn"
-            android:nextFocusDown="@id/forgotPasswordBtn" />
-
-        <Button
-            android:id="@+id/forgotPasswordBtn"
-            android:layout_width="320dp"
-            android:layout_height="wrap_content"
-            android:text="¿Olvidaste tu contraseña?"
+            android:text="Volver"
             android:textAllCaps="false"
             android:background="@drawable/text_button_selector"
             android:textColor="@color/muted_gray"
             android:focusable="true"
             android:focusableInTouchMode="true"
-            android:nextFocusUp="@id/signUpBtn" />
+            android:nextFocusUp="@id/loginSubmitBtn" />
 
         <TextView
             android:id="@+id/loginError"
             android:layout_width="320dp"
             android:layout_height="wrap_content"
             android:textColor="@color/error_red"
+            android:layout_marginTop="8dp"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <!-- ===================== PANEL: CREAR CUENTA NUEVA ===================== -->
+    <LinearLayout
+        android:id="@+id/signUpPanelSection"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="48dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Crear cuenta nueva"
+            android:textColor="@color/white"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="20dp" />
+
+        <EditText
+            android:id="@+id/signUpEmail"
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:hint="Correo de Gmail"
+            android:inputType="textEmailAddress"
+            android:textColor="@color/white"
+            android:textColorHint="@color/muted_gray"
+            android:padding="14dp"
+            android:background="@drawable/input_background"
+            android:layout_marginBottom="12dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusDown="@id/signUpPassword" />
+
+        <EditText
+            android:id="@+id/signUpPassword"
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:hint="Contraseña (mínimo 6 caracteres)"
+            android:inputType="textPassword"
+            android:textColor="@color/white"
+            android:textColorHint="@color/muted_gray"
+            android:padding="14dp"
+            android:background="@drawable/input_background"
+            android:layout_marginBottom="16dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusUp="@id/signUpEmail"
+            android:nextFocusDown="@id/signUpSubmitBtn" />
+
+        <Button
+            android:id="@+id/signUpSubmitBtn"
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:text="Crear cuenta"
+            android:textAllCaps="false"
+            android:backgroundTint="@color/accent_orange"
+            android:layout_marginBottom="8dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusUp="@id/signUpPassword"
+            android:nextFocusDown="@id/signUpBackBtn" />
+
+        <Button
+            android:id="@+id/signUpBackBtn"
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:text="Volver"
+            android:textAllCaps="false"
+            android:background="@drawable/text_button_selector"
+            android:textColor="@color/muted_gray"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusUp="@id/signUpSubmitBtn" />
+
+        <TextView
+            android:id="@+id/signUpError"
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:textColor="@color/error_red"
+            android:layout_marginTop="8dp"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <!-- ===================== PANEL: OLVIDÉ MI CONTRASEÑA ===================== -->
+    <LinearLayout
+        android:id="@+id/forgotPanelSection"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="48dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="¿Olvidaste tu contraseña?"
+            android:textColor="@color/white"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:text="Escribe tu correo y te mandamos un enlace para cambiarla."
+            android:textColor="@color/muted_gray"
+            android:gravity="center"
+            android:layout_marginBottom="20dp" />
+
+        <EditText
+            android:id="@+id/forgotEmail"
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:hint="Correo de Gmail"
+            android:inputType="textEmailAddress"
+            android:textColor="@color/white"
+            android:textColorHint="@color/muted_gray"
+            android:padding="14dp"
+            android:background="@drawable/input_background"
+            android:layout_marginBottom="16dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusDown="@id/forgotSubmitBtn" />
+
+        <Button
+            android:id="@+id/forgotSubmitBtn"
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:text="Enviar enlace"
+            android:textAllCaps="false"
+            android:backgroundTint="@color/accent_blue"
+            android:layout_marginBottom="8dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusUp="@id/forgotEmail"
+            android:nextFocusDown="@id/forgotBackBtn" />
+
+        <Button
+            android:id="@+id/forgotBackBtn"
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:text="Volver"
+            android:textAllCaps="false"
+            android:background="@drawable/text_button_selector"
+            android:textColor="@color/muted_gray"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusUp="@id/forgotSubmitBtn" />
+
+        <TextView
+            android:id="@+id/forgotError"
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:textColor="@color/error_red"
+            android:layout_marginTop="8dp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/forgotStatus"
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:textColor="@color/white"
+            android:gravity="center"
             android:layout_marginTop="8dp"
             android:visibility="gone" />
     </LinearLayout>
