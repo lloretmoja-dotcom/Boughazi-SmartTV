@@ -102,10 +102,50 @@ def find_duplicates(channels):
     return duplicate_ids
 
 
+# Cabecera que imita a un reproductor de vídeo de verdad (VLC). Muchos
+# servidores de streaming rechazan o devuelven una página de error a
+# peticiones que no llevan un "user-agent" de reproductor conocido —
+# antes esto podía hacer que un canal que SÍ funciona en la aplicación
+# pareciera caído solo por cómo se hacía la comprobación.
+PLAYER_USER_AGENT = "VLC/3.0.20 LibVLC/3.0.20"
+
+# Cuánto contenido real del enlace se descarga para comprobar que es un
+# vídeo/lista de canales de verdad, y no una página de error disfrazada
+# de "200 OK". No hace falta bajar el archivo entero.
+CONTENT_CHECK_BYTES = 4096
+
+
+def _looks_like_real_stream(url, content_type, body_bytes):
+    """Un canal puede responder con HTTP 200 (código "todo bien") y aun
+    así no servir para nada: una página de error, un aviso de "canal no
+    disponible en tu país", una lista de reproducción vacía, etc. Esta
+    función mira el contenido de verdad para no dejarse engañar por el
+    código de estado."""
+    text_start = body_bytes[:CONTENT_CHECK_BYTES].decode("utf-8", errors="ignore").strip()
+
+    es_lista_m3u = url.lower().split("?")[0].endswith((".m3u8", ".m3u"))
+    if es_lista_m3u:
+        # Una lista de canales/segmentos de verdad SIEMPRE empieza por
+        # esta cabecera. Si no, es casi seguro una página de error o un
+        # inicio de sesión, aunque el servidor haya dicho "200 OK".
+        return text_start.upper().startswith("#EXTM3U") and len(text_start) > 15
+
+    # Para enlaces que no son .m3u8 (vídeo directo u otro formato): si
+    # el "content-type" dice que es una página web (html/json/texto
+    # normal) en vez de vídeo o audio, es casi seguro un error disfrazado.
+    content_type = (content_type or "").lower()
+    if "text/html" in content_type or "application/json" in content_type:
+        return False
+
+    # Y si no ha devuelto prácticamente nada de contenido, tampoco vale.
+    return len(body_bytes) > 32
+
+
 async def check_one(session, sem, channel):
-    """Devuelve True si el canal responde bien, False si no. Se hace un
-    segundo intento (con una pequeña espera) antes de dar un canal por
-    caído de verdad, por si ha sido solo un corte momentáneo."""
+    """Devuelve True si el canal responde bien Y de verdad sirve
+    contenido real (no una página de error disfrazada de "200 OK"). Se
+    hace un segundo intento (con una pequeña espera) antes de dar un
+    canal por caído de verdad, por si ha sido solo un corte momentáneo."""
     url = (channel.get("stream_url") or "").strip()
     if not url.startswith("http"):
         return False
@@ -113,8 +153,13 @@ async def check_one(session, sem, channel):
     async def attempt():
         try:
             timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
-            async with session.get(url, timeout=timeout, allow_redirects=True) as resp:
-                return resp.ok
+            headers = {"User-Agent": PLAYER_USER_AGENT}
+            async with session.get(url, timeout=timeout, allow_redirects=True, headers=headers) as resp:
+                if not resp.ok:
+                    return False
+                content_type = resp.headers.get("Content-Type", "")
+                body = await resp.content.read(CONTENT_CHECK_BYTES)
+                return _looks_like_real_stream(url, content_type, body)
         except Exception:
             return False
 
