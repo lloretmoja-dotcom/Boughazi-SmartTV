@@ -37,6 +37,12 @@ class ChannelRepository {
         val allChannels = mutableListOf<Channel>()
 
         while (true) {
+            // Todo este bloque (conexión, lectura Y análisis) va dentro de un
+            // único try/catch. Antes, un fallo de red en la SEGUNDA tanda en
+            // adelante (no en la primera) podía "escaparse" sin control y
+            // dejar la lista a medias sin que nadie se enterara. Ahora,
+            // cualquier fallo en cualquier tanda para todo el proceso y lo
+            // dice claramente, con el número de tanda donde ha pasado.
             try {
                 val url = URL(
                     "${SupabaseConfig.URL}/rest/v1/bt_channels" +
@@ -48,9 +54,21 @@ class ChannelRepository {
                 conn.requestMethod = "GET"
                 conn.setRequestProperty("apikey", SupabaseConfig.ANON_KEY)
                 conn.setRequestProperty("Authorization", "Bearer ${session.accessToken}")
+                // Igual que hace el panel de administración (que ya sabemos
+                // que funciona bien con miles de canales): pedimos cada
+                // tanda con las cabeceras "Range", para que Supabase nos
+                // deje avanzar de verdad más allá de los primeros 1000.
                 conn.setRequestProperty("Range-Unit", "items")
                 conn.setRequestProperty("Range", "$offset-${offset + pageSize - 1}")
-                conn.setRequestProperty("Prefer", "count=exact")
+                // Pedimos el total real que tiene la base de datos, pero SOLO
+                // en la primera tanda. Antes se pedía en todas las tandas, y
+                // eso obligaba al servidor a contar TODOS los canales de la
+                // base de datos una vez por cada tanda (muy lento si hay
+                // miles de canales) en vez de solo una vez. Esta es la razón
+                // principal de que la app tardara varios minutos en cargar.
+                if (page == 1) {
+                    conn.setRequestProperty("Prefer", "count=exact")
+                }
                 conn.connectTimeout = 15000
                 conn.readTimeout = 15000
 
@@ -67,6 +85,8 @@ class ChannelRepository {
                 }
 
                 if (page == 1 && contentRange != null) {
+                    // La cabecera tiene forma "0-999/4041". Nos quedamos con
+                    // el número de después de la barra.
                     totalReportedByServer = contentRange.substringAfter("/", "").toIntOrNull()
                 }
 
