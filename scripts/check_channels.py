@@ -1,14 +1,28 @@
 """
 Comprueba, uno por uno, si el enlace de vídeo (stream_url) de cada canal
-de la tabla bt_channels responde de verdad, y BORRA PARA SIEMPRE de la
-base de datos (sin dejar rastro, no solo ocultos):
+de la tabla bt_channels responde de verdad, y:
 
-  - los canales que fallan dos veces seguidas (con una pequeña espera
-    entre intento e intento, por si ha sido solo un corte de red
-    pasajero y no un canal de verdad muerto)
-  - los canales duplicados: cuando dos o más filas tienen exactamente
-    el mismo enlace de vídeo, solo se queda una (la que tiene número
-    de canal asignado, o si no la más antigua) y se borran las demás
+  - los canales que fallan (dos intentos seguidos, con una pequeña espera
+    entre uno y otro) se marcan como CAÍDOS (is_broken = true). La app de
+    la tele ya no los muestra, pero siguen en la base de datos por si
+    vuelven: si a la noche siguiente responden, se reactivan solos.
+  - solo se BORRAN para siempre los que llevan más de
+    DIAS_ANTES_DE_BORRAR días seguidos caídos (se sabe por la fecha
+    "last_checked_at", que se pone al día cada noche que el canal SÍ
+    funciona).
+  - los canales duplicados (exactamente el mismo enlace de vídeo) se
+    borran, quedándose uno (el que tiene número de canal asignado, o si no
+    el más antiguo).
+
+POR QUÉ YA NO SE BORRA A LA PRIMERA: esta comprobación se hace desde los
+servidores de GitHub (en EE. UU.). Muchos canales están bloqueados por
+país, o fallan un momento a las 3 de la mañana, y aun así funcionan en
+la tele de la gente. Antes se perdían para siempre por eso.
+
+FRENO DE SEGURIDAD: si de golpe falla más del PORCENTAJE_MAXIMO_CAIDOS %
+de los canales, casi seguro el problema es de la red del servidor de
+GitHub o de Supabase, no de los canales. En ese caso el script NO toca
+nada y termina en rojo para que se vea en la pestaña "Actions".
 
 IMPORTANTE — por qué antes "no funcionaba de verdad":
 Cuando se protegieron las tablas de Supabase con seguridad a nivel de
@@ -42,6 +56,9 @@ CONCURRENCY = 50
 REQUEST_TIMEOUT_SECONDS = 10
 PAGE_SIZE = 1000
 SEGUNDA_ESPERA_SEGUNDOS = 3  # pausa antes del segundo intento, por si el corte era pasajero
+DIAS_ANTES_DE_BORRAR = 7  # días seguidos caído antes de borrarlo para siempre
+PORCENTAJE_MAXIMO_CAIDOS = 30  # si falla más que esto, no se toca nada (freno de seguridad)
+MINIMO_CANALES_PARA_FRENO = 20  # con muy pocos canales el porcentaje no dice nada
 
 
 def _now_iso():
@@ -62,7 +79,7 @@ async def fetch_all_channels(session):
     while True:
         url = (
             f"{SUPABASE_URL}/rest/v1/bt_channels"
-            "?select=id,name,stream_url,channel_number,is_broken"
+            "?select=id,name,stream_url,channel_number,is_broken,last_checked_at"
         )
         headers = {
             **_headers(),
@@ -81,14 +98,17 @@ async def fetch_all_channels(session):
 
 def find_duplicates(channels):
     """Agrupa los canales por su enlace de vídeo (normalizado: sin
-    espacios ni mayúsculas/minúsculas). De cada grupo con más de un
+    espacios). De cada grupo con más de un
     canal, se queda con uno solo (el que tenga número de canal
     asignado; si ninguno lo tiene, el más antiguo por id) y devuelve
     los ids de los demás, que son duplicados de verdad y se pueden
     borrar sin miedo."""
     groups = {}
     for ch in channels:
-        key = (ch.get("stream_url") or "").strip().lower()
+        # Solo se quitan los espacios: muchos enlaces llevan un "token" en
+        # el que mayúsculas y minúsculas importan, así que dos enlaces que
+        # solo se diferencian en eso son canales distintos.
+        key = (ch.get("stream_url") or "").strip()
         if not key:
             continue
         groups.setdefault(key, []).append(ch)
@@ -261,6 +281,42 @@ async def mark_checked(session, sem, ids):
     await asyncio.gather(*(touch(cid) for cid in ids))
 
 
+async def mark_broken(session, sem, ids):
+    """Marca canales como caídos (la app deja de mostrarlos) SIN borrarlos.
+    No se toca "last_checked_at": así sigue guardando la última vez que
+    el canal funcionó, y se sabe cuántos días lleva caído."""
+    if not ids:
+        return
+
+    async def flag(cid):
+        url = f"{SUPABASE_URL}/rest/v1/bt_channels?id=eq.{cid}"
+        headers = {**_headers(), "Content-Type": "application/json", "Prefer": "return=minimal"}
+        async with sem:
+            async with session.patch(url, headers=headers, json={"is_broken": True}) as resp:
+                if resp.status not in (200, 204):
+                    body = await resp.text()
+                    print(f"  ! No se pudo marcar como caído el canal {cid}: HTTP {resp.status} — {body}")
+
+    await asyncio.gather(*(flag(cid) for cid in ids))
+    print(f"Marcados como caídos (ocultos en la app, no borrados): {len(ids)}")
+
+
+def _lleva_caido_demasiado(channel, ahora):
+    """True si el canal no ha funcionado ni una sola vez en los últimos
+    DIAS_ANTES_DE_BORRAR días. Si nunca se ha comprobado con éxito (sin
+    fecha), no se borra: se queda oculto y el admin decide."""
+    valor = channel.get("last_checked_at")
+    if not valor:
+        return False
+    try:
+        ultima_vez_ok = datetime.datetime.fromisoformat(valor.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if ultima_vez_ok.tzinfo is None:
+        ultima_vez_ok = ultima_vez_ok.replace(tzinfo=datetime.timezone.utc)
+    return ahora - ultima_vez_ok > datetime.timedelta(days=DIAS_ANTES_DE_BORRAR)
+
+
 async def main():
     if not SUPABASE_SERVICE_ROLE_KEY:
         print(
@@ -298,20 +354,43 @@ async def main():
         dead = [ch for ch, alive in zip(channels, results) if not alive]
         alive_ids = [ch["id"] for ch, alive in zip(channels, results) if alive]
 
+        # Freno de seguridad: si falla una parte enorme de golpe, el
+        # problema casi seguro no son los canales. No se toca nada.
+        if len(channels) >= MINIMO_CANALES_PARA_FRENO:
+            porcentaje = 100 * len(dead) / len(channels)
+            if porcentaje > PORCENTAJE_MAXIMO_CAIDOS:
+                print(
+                    f"\nFRENO DE SEGURIDAD: han fallado {len(dead)} de {len(channels)} canales "
+                    f"({porcentaje:.0f} %), más del {PORCENTAJE_MAXIMO_CAIDOS} %. Seguramente es un "
+                    "problema de red del servidor y no de los canales, así que NO se ha marcado "
+                    "ni borrado ninguno. Vuelve a lanzarlo más tarde desde la pestaña Actions."
+                )
+                sys.exit(1)
+
+        ahora = datetime.datetime.now(datetime.timezone.utc)
+        to_delete = [ch for ch in dead if _lleva_caido_demasiado(ch, ahora)]
+        to_delete_ids = {ch["id"] for ch in to_delete}
+        to_flag = [ch for ch in dead if ch["id"] not in to_delete_ids and not ch.get("is_broken")]
+
         if dead:
-            print(f"\nCanales caídos que se borran para siempre: {len(dead)}")
+            print(f"\nCanales que no responden hoy: {len(dead)}")
             for ch in dead:
                 print(f"  - {ch.get('name')} ({ch['id']})")
-            await delete_channels(session, sem, [ch["id"] for ch in dead], "caídos")
+            await mark_broken(session, sem, [ch["id"] for ch in to_flag])
+            await delete_channels(
+                session, sem, list(to_delete_ids), f"más de {DIAS_ANTES_DE_BORRAR} días caídos"
+            )
         else:
             print("\nNo hay canales caídos ahora mismo.")
 
-        # 3) A los que sí funcionan, se les anota cuándo se comprobaron.
+        # 3) A los que sí funcionan se les anota cuándo se comprobaron
+        # (y si estaban marcados como caídos, vuelven a aparecer en la app).
         await mark_checked(session, sem, alive_ids)
 
         print("\nResumen final:")
         print(f"  Duplicados borrados: {len(duplicate_ids)}")
-        print(f"  Caídos borrados: {len(dead)}")
+        print(f"  Caídos hoy (ocultos en la app): {len(dead)}")
+        print(f"  Borrados por llevar más de {DIAS_ANTES_DE_BORRAR} días caídos: {len(to_delete_ids)}")
         print(f"  Funcionando de verdad ahora mismo: {len(alive_ids)}")
 
 

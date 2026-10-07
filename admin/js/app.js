@@ -178,15 +178,19 @@ function renderChannels() {
         : '<span class="status-ok">● OK</span>';
       return `
         <tr>
-          <td><input type="checkbox" class="row-check" data-id="${c.id}" ${
+          <td><input type="checkbox" class="row-check" data-id="${escapeHtml(c.id)}" ${
         state.selectedIds.has(c.id) ? "checked" : ""
       } /></td>
-          <td>${c.channel_number ?? "—"}</td>
+          <td>${escapeHtml(c.channel_number ?? "—")}</td>
           <td class="name-cell" dir="auto">${escapeHtml(c.name)}</td>
           <td class="cat-cell" dir="auto">${escapeHtml(c.category || "")}</td>
           <td>${statusHtml}</td>
-          <td><a class="link-icon" href="${c.stream_url}" target="_blank" rel="noopener">ver enlace</a></td>
-          <td><button class="btn danger" data-delete="${c.id}">Borrar</button></td>
+          <td>${
+        safeHttpUrl(c.stream_url)
+          ? `<a class="link-icon" href="${escapeHtml(c.stream_url)}" target="_blank" rel="noopener noreferrer">ver enlace</a>`
+          : '<span class="status-broken">enlace no válido</span>'
+      }</td>
+          <td><button class="btn danger" data-delete="${escapeHtml(c.id)}">Borrar</button></td>
         </tr>`;
     })
     .join("");
@@ -201,6 +205,19 @@ function renderChannels() {
   document.querySelectorAll("[data-delete]").forEach((btn) => {
     btn.addEventListener("click", () => deleteChannels([btn.dataset.delete]));
   });
+}
+
+/* Solo se aceptan enlaces que empiecen por http:// o https://. Las listas
+   M3U suelen venir de terceros: un enlace del tipo "javascript:..."
+   podría ejecutar código en este panel con tu sesión de administrador
+   (y desde aquí se puede borrar o cambiar todo). */
+function safeHttpUrl(str) {
+  try {
+    const u = new URL(String(str || "").trim());
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch (_err) {
+    return false;
+  }
 }
 
 function escapeHtml(str) {
@@ -286,6 +303,12 @@ el("channel-form").addEventListener("submit", async (e) => {
     logo_url: el("cf-logo").value.trim() || null,
     stream_url: el("cf-src").value.trim(),
   };
+  if (!safeHttpUrl(payload.stream_url)) {
+    el("channel-form-error").textContent = "El enlace del canal tiene que empezar por http:// o https://";
+    el("channel-form-error").classList.remove("hidden");
+    return;
+  }
+  if (payload.logo_url && !safeHttpUrl(payload.logo_url)) payload.logo_url = null;
   const { error } = await supabaseClient.from("bt_channels").insert(payload);
   if (error) {
     el("channel-form-error").textContent = error.message;
@@ -317,7 +340,10 @@ el("check-channels-btn").addEventListener("click", async () => {
     if (broken !== c.is_broken) {
       await supabaseClient
         .from("bt_channels")
-        .update({ is_broken: broken, last_checked_at: new Date().toISOString() })
+        // "last_checked_at" guarda la última vez que el canal FUNCIONÓ (el
+        // script nocturno lo usa para saber cuántos días lleva caído), así
+        // que solo se pone al día cuando el canal responde bien.
+        .update(broken ? { is_broken: true } : { is_broken: false, last_checked_at: new Date().toISOString() })
         .eq("id", c.id);
     }
   }
@@ -380,7 +406,10 @@ el("import-file-input").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   const text = await file.text();
-  const items = parseChannelList(text).filter((it) => it.streamUrl);
+  const parsed = parseChannelList(text).filter((it) => it.streamUrl);
+  // Se descartan los enlaces que no son http:// ni https:// (ver safeHttpUrl).
+  const items = parsed.filter((it) => safeHttpUrl(it.streamUrl));
+  const skipped = parsed.length - items.length;
 
   if (!items.length) {
     el("import-status").textContent = "No se ha encontrado ningún canal en ese archivo. Comprueba que sea un M3U válido.";
@@ -390,7 +419,9 @@ el("import-file-input").addEventListener("change", async (e) => {
   }
 
   state.importItems = items.map((it, i) => ({ ...it, id: i, selected: true }));
-  el("import-status").textContent = `${items.length} canal(es) encontrados. Quita el visto de los que no quieras subir y toca "Importar".`;
+  el("import-status").textContent =
+    `${items.length} canal(es) encontrados. Quita el visto de los que no quieras subir y toca "Importar".` +
+    (skipped ? ` (Se han descartado ${skipped} con un enlace no válido.)` : "");
   renderImportPreview();
   el("import-preview-wrap").classList.remove("hidden");
   el("import-select-all").checked = true;
@@ -404,7 +435,7 @@ function renderImportPreview() {
     .map(
       (it) => `
         <tr>
-          <td><input type="checkbox" class="import-row-check" data-id="${it.id}" ${it.selected ? "checked" : ""} /></td>
+          <td><input type="checkbox" class="import-row-check" data-id="${escapeHtml(it.id)}" ${it.selected ? "checked" : ""} /></td>
           <td>${escapeHtml(it.name)}</td>
           <td>${escapeHtml(override || it.category || "")}</td>
         </tr>`
@@ -445,7 +476,7 @@ el("import-confirm-btn").addEventListener("click", async () => {
     channel_number: nextNumber++,
     name: it.name,
     category: override || it.category || null,
-    logo_url: it.logoUrl || null,
+    logo_url: safeHttpUrl(it.logoUrl) ? it.logoUrl : null,
     stream_url: it.streamUrl,
   }));
 
@@ -492,11 +523,11 @@ async function loadCodes() {
         : '<span class="status-ok">Libre</span>';
       return `
         <tr>
-          <td>${code.code}</td>
+          <td>${escapeHtml(code.code)}</td>
           <td>${escapeHtml(code.label || "")}</td>
           <td>${statusHtml}</td>
           <td>${escapeHtml(code.used_by_email || "—")}</td>
-          <td><button class="btn danger" data-del-code="${code.id}">Borrar</button></td>
+          <td><button class="btn danger" data-del-code="${escapeHtml(code.id)}">Borrar</button></td>
         </tr>`;
     })
     .join("");
