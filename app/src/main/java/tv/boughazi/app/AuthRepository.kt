@@ -88,7 +88,12 @@ class AuthRepository {
         }
     }
 
-    suspend fun sendPasswordReset(email: String): AuthResult = withContext(Dispatchers.IO) {
+    /**
+     * Devuelve null si el correo se ha enviado, o el mensaje de error si
+     * no se pudo. Antes devolvía siempre Failure, y el aviso de "te hemos
+     * enviado un correo" salía en rojo como si fuera un error.
+     */
+    suspend fun sendPasswordReset(email: String): String? = withContext(Dispatchers.IO) {
         try {
             // Igual que arriba: mandamos a la persona a reset-password.html,
             // que es la página donde de verdad puede escribir su
@@ -99,9 +104,9 @@ class AuthRepository {
             postJson(url, body)
             // Supabase siempre responde con éxito aquí (por seguridad, no
             // revela si el correo existe o no), así que damos el aviso normal.
-            AuthResult.Failure("Si esa cuenta existe, te hemos enviado un correo a tu Gmail para restablecer la contraseña.")
+            null
         } catch (e: Exception) {
-            AuthResult.Failure(e.message ?: "No se pudo conectar. Revisa tu conexión a internet.")
+            e.message ?: "No se pudo conectar. Revisa tu conexión a internet."
         }
     }
 
