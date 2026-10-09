@@ -109,16 +109,7 @@ class MainActivity : AppCompatActivity() {
             if (saved.hasLinkedCode) {
                 enterMainSection()
             } else {
-                lifecycleScope.launch {
-                    val already = codeRepository.checkAlreadyLinked(saved)
-                    if (already) {
-                        saved.hasLinkedCode = true
-                        sessionManager.markCodeLinked()
-                        enterMainSection()
-                    } else {
-                        showOnly(codeSection)
-                    }
-                }
+                lifecycleScope.launch { goToCodeOrMain(saved) }
             }
         }
     }
@@ -228,15 +219,33 @@ class MainActivity : AppCompatActivity() {
     private fun onAuthSuccess(newSession: UserSession) {
         session = newSession
         sessionManager.save(newSession)
-        lifecycleScope.launch {
-            val already = codeRepository.checkAlreadyLinked(newSession)
-            if (already) {
-                newSession.hasLinkedCode = true
-                sessionManager.markCodeLinked()
-                enterMainSection()
-            } else {
-                showOnly(codeSection)
+        lifecycleScope.launch { goToCodeOrMain(newSession) }
+    }
+
+    /**
+     * Si la cuenta ya tiene un código vinculado, entra directamente a la
+     * tele; si no, pide el código. Si la sesión guardada ha caducado, la
+     * renueva primero: antes se daba por hecho que "no tiene código" y se
+     * pedía (y gastaba) un código nuevo a quien ya tenía uno.
+     */
+    private suspend fun goToCodeOrMain(start: UserSession) {
+        var current = start
+        var linked = codeRepository.checkAlreadyLinked(current)
+        if (linked == null) {
+            val refreshed = authRepository.refreshSession(current.refreshToken)
+            if (refreshed is AuthResult.Success) {
+                current = refreshed.session.copy(hasLinkedCode = current.hasLinkedCode)
+                session = current
+                sessionManager.save(current)
+                linked = codeRepository.checkAlreadyLinked(current)
             }
+        }
+        if (linked == true) {
+            current.hasLinkedCode = true
+            sessionManager.markCodeLinked()
+            enterMainSection()
+        } else {
+            showOnly(codeSection)
         }
     }
 

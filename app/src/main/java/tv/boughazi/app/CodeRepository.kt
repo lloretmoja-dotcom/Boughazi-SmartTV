@@ -7,6 +7,7 @@ import org.json.JSONObject
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -27,10 +28,16 @@ private data class PatchResult(val status: Int, val array: JSONArray?, val rawBo
 
 class CodeRepository {
 
-    suspend fun checkAlreadyLinked(session: UserSession): Boolean = withContext(Dispatchers.IO) {
+    /**
+     * Mira en Supabase si esta cuenta ya tiene un código vinculado.
+     * Devuelve null si la sesión ha caducado (HTTP 401/403), para que
+     * quien llama renueve la sesión y lo vuelva a intentar, en vez de
+     * creer que la cuenta no tiene código y pedir (y gastar) otro.
+     */
+    suspend fun checkAlreadyLinked(session: UserSession): Boolean? = withContext(Dispatchers.IO) {
         try {
             val url = URL(
-                "${SupabaseConfig.URL}/rest/v1/bt_viewers?id=eq.${session.userId}&select=linked_code"
+                "${SupabaseConfig.URL}/rest/v1/bt_viewers?id=eq.${encode(session.userId)}&select=linked_code"
             )
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "GET"
@@ -38,7 +45,9 @@ class CodeRepository {
             conn.setRequestProperty("Authorization", "Bearer ${session.accessToken}")
             conn.connectTimeout = 15000
             conn.readTimeout = 15000
-            val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
+            val status = conn.responseCode
+            if (status == 401 || status == 403) return@withContext null
+            val stream = if (status in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() } ?: "[]"
             val arr = JSONArray(text)
             if (arr.length() == 0) return@withContext false
@@ -49,44 +58,100 @@ class CodeRepository {
         }
     }
 
+    /**
+     * Activa un código. Primero usa la función segura de Supabase
+     * "bt_redeem_code", que reclama el código y vincula la cuenta en un
+     * solo paso dentro de la base de datos (o las dos cosas, o ninguna).
+     * Si esa función todavía no existe en Supabase (no se ha ejecutado
+     * el SQL de supabase/seguridad-activacion.sql), se usa el método
+     * antiguo de dos pasos para que la app siga funcionando mientras.
+     */
     suspend fun redeemCode(session: UserSession, code: String): RedeemResult =
         withContext(Dispatchers.IO) {
-            val nowIso = isoNow()
-            val claimUrl = URL(
-                "${SupabaseConfig.URL}/rest/v1/bt_access_codes" +
-                    "?code=eq.${code.trim().uppercase()}&used_by_email=is.null&active=eq.true"
+            val cleanCode = code.trim().uppercase()
+            val rpc = postJson(
+                URL("${SupabaseConfig.URL}/rest/v1/rpc/bt_redeem_code"),
+                session.accessToken,
+                JSONObject().apply { put("p_code", cleanCode) }
             )
-            val claimBody = JSONObject().apply {
-                put("used_by_email", session.email)
-                put("used_at", nowIso)
+            when {
+                rpc.status in 200..299 ->
+                    if (rpc.rawBody.trim() == "true") {
+                        RedeemResult.Success
+                    } else {
+                        RedeemResult.Failure(rpc.status, "Código no válido, desactivado o ya usado.")
+                    }
+                // 404 = la función aún no está creada en Supabase.
+                rpc.status == 404 -> redeemCodeLegacy(session, cleanCode)
+                else -> RedeemResult.Failure(rpc.status, describeError(rpc.rawBody))
             }
-            val claimResult = patchJson(claimUrl, session.accessToken, claimBody)
-
-            if (claimResult.status !in 200..299) {
-                return@withContext RedeemResult.Failure(
-                    claimResult.status,
-                    describeError(claimResult.rawBody)
-                )
-            }
-            if (claimResult.array == null || claimResult.array.length() == 0) {
-                // La petición fue "correcta" (200) pero no devolvió ninguna
-                // fila: o el código ya no cumple el filtro (ya usado / no
-                // existe), o una política de RLS está bloqueando la
-                // lectura de la fila tras actualizarla.
-                return@withContext RedeemResult.Failure(
-                    claimResult.status,
-                    "No se actualizó ninguna fila (respuesta vacía: '${claimResult.rawBody}')"
-                )
-            }
-
-            val viewerUrl = URL("${SupabaseConfig.URL}/rest/v1/bt_viewers?id=eq.${session.userId}")
-            val viewerBody = JSONObject().apply {
-                put("linked_code", code.trim().uppercase())
-                put("linked_at", nowIso)
-            }
-            patchJson(viewerUrl, session.accessToken, viewerBody)
-            RedeemResult.Success
         }
+
+    private fun redeemCodeLegacy(session: UserSession, cleanCode: String): RedeemResult {
+        val nowIso = isoNow()
+        val claimUrl = URL(
+            "${SupabaseConfig.URL}/rest/v1/bt_access_codes" +
+                "?code=eq.${encode(cleanCode)}&used_by_email=is.null&active=eq.true"
+        )
+        val claimBody = JSONObject().apply {
+            put("used_by_email", session.email)
+            put("used_at", nowIso)
+        }
+        val claimResult = patchJson(claimUrl, session.accessToken, claimBody)
+
+        if (claimResult.status !in 200..299) {
+            return RedeemResult.Failure(claimResult.status, describeError(claimResult.rawBody))
+        }
+        if (claimResult.array == null || claimResult.array.length() == 0) {
+            return RedeemResult.Failure(
+                claimResult.status,
+                "No se actualizó ninguna fila (respuesta vacía: '${claimResult.rawBody}')"
+            )
+        }
+
+        val viewerUrl = URL("${SupabaseConfig.URL}/rest/v1/bt_viewers?id=eq.${encode(session.userId)}")
+        val viewerBody = JSONObject().apply {
+            put("linked_code", cleanCode)
+            put("linked_at", nowIso)
+        }
+        val viewerResult = patchJson(viewerUrl, session.accessToken, viewerBody)
+        if (viewerResult.status !in 200..299 || viewerResult.array == null || viewerResult.array.length() == 0) {
+            // No se pudo vincular la cuenta: devolvemos el código para que
+            // no quede gastado sin que la persona pueda entrar.
+            val releaseUrl = URL(
+                "${SupabaseConfig.URL}/rest/v1/bt_access_codes" +
+                    "?code=eq.${encode(cleanCode)}&used_by_email=eq.${encode(session.email)}"
+            )
+            patchJson(releaseUrl, session.accessToken, JSONObject().apply {
+                put("used_by_email", JSONObject.NULL)
+                put("used_at", JSONObject.NULL)
+            })
+            return RedeemResult.Failure(
+                viewerResult.status,
+                "No se pudo vincular el código a tu cuenta: ${describeError(viewerResult.rawBody)}"
+            )
+        }
+        return RedeemResult.Success
+    }
+
+    private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
+
+    private fun postJson(url: URL, accessToken: String, body: JSONObject): PatchResult {
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty("apikey", SupabaseConfig.ANON_KEY)
+        conn.setRequestProperty("Authorization", "Bearer $accessToken")
+        conn.doOutput = true
+        conn.connectTimeout = 15000
+        conn.readTimeout = 15000
+        OutputStreamWriter(conn.outputStream).use { it.write(body.toString()) }
+
+        val status = conn.responseCode
+        val stream = if (status in 200..299) conn.inputStream else conn.errorStream
+        val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
+        return PatchResult(status, null, text)
+    }
 
     private fun describeError(rawBody: String): String {
         return try {

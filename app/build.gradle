@@ -11,11 +11,39 @@ android {
         applicationId "tv.boughazi.app"
         minSdk 21
         targetSdk 34
-        versionCode 1
-        versionName "1.0.0"
+        // En GitHub Actions el número de versión sube solo en cada
+        // compilación (VERSION_CODE lo pone el workflow). Android solo
+        // instala una actualización si este número es MAYOR que el de la
+        // versión que ya está en la tele.
+        versionCode((System.getenv("VERSION_CODE") ?: "1").toInteger())
+        versionName System.getenv("VERSION_NAME") ?: "1.0.0"
+    }
+
+    // Firma fija para que cada APK nuevo se instale ENCIMA del anterior.
+    // Sin ella, cada compilación de GitHub Actions usa una firma distinta
+    // y aleatoria, y Android se niega en silencio a actualizar la app.
+    // La clave NO se guarda en el repositorio (es público): el workflow
+    // la crea a partir de los secretos de GitHub antes de compilar.
+    def keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+    def hasFixedKey = keystorePath != null && file(keystorePath).exists()
+
+    if (hasFixedKey) {
+        signingConfigs {
+            fixed {
+                storeFile file(keystorePath)
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
+        debug {
+            if (hasFixedKey) {
+                signingConfig signingConfigs.fixed
+            }
+        }
         release {
             minifyEnabled false
         }
