@@ -31,9 +31,11 @@ android {
         signingConfigs {
             fixed {
                 storeFile file(keystorePath)
-                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                keyAlias System.getenv("ANDROID_KEY_ALIAS")
-                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+                // trim(): quita espacios o saltos de línea que se cuelan
+                // al pegar el secreto desde el móvil.
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")?.trim()
+                keyAlias System.getenv("ANDROID_KEY_ALIAS")?.trim()
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD")?.trim()
             }
         }
     }

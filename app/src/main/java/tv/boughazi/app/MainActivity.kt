@@ -51,8 +51,22 @@ class MainActivity : AppCompatActivity() {
     private var presenceRunnable: Runnable? = null
     private var channelRefreshRunnable: Runnable? = null
 
+    // Reintentos del canal que se está viendo cuando falla. Antes se
+    // reintentaba cada 3 segundos para siempre y la pantalla se quedaba
+    // en negro sin explicación.
+    private var playbackRetries = 0
+    private var retryRunnable: Runnable? = null
+
+    // Para salir de la app hay que pulsar "atrás" dos veces seguidas:
+    // así un toque sin querer al cambiar de canal no la cierra.
+    private var lastBackPressAt = 0L
+
     companion object {
         private const val CHANNEL_REFRESH_INTERVAL_MS = 5 * 60 * 1000L // 5 minutos
+        private const val PRESENCE_INTERVAL_MS = 20_000L
+        private const val MAX_PLAYBACK_RETRIES = 3
+        private const val PLAYBACK_RETRY_DELAY_MS = 3000L
+        private const val EXIT_CONFIRM_WINDOW_MS = 2000L
     }
 
     private lateinit var welcomeSection: View
@@ -198,12 +212,12 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             lifecycleScope.launch {
-                val result = authRepository.sendPasswordReset(email)
-                if (result is AuthResult.Failure) {
-                    showError(errorText, result.message)
+                val error = authRepository.sendPasswordReset(email)
+                if (error != null) {
+                    showError(errorText, error)
                 } else {
                     errorText.visibility = View.GONE
-                    statusText.text = "Te hemos mandado un enlace a tu correo para cambiar la contraseña."
+                    statusText.text = "Si esa cuenta existe, te hemos enviado un enlace a tu correo para cambiar la contraseña."
                     statusText.visibility = View.VISIBLE
                 }
             }
@@ -313,11 +327,11 @@ class MainActivity : AppCompatActivity() {
             playerView.player = player
             player.addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
-                    handler.postDelayed({
-                        if (currentIndex in allChannels.indices) {
-                            playChannel(currentIndex)
-                        }
-                    }, 3000)
+                    onPlaybackFailed()
+                }
+
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_READY) playbackRetries = 0
                 }
             })
         }
@@ -498,7 +512,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun playChannel(index: Int) {
+        playbackRetries = 0
+        startPlayback(index)
+    }
+
+    private fun startPlayback(index: Int) {
         if (index !in allChannels.indices) return
+        retryRunnable?.let { handler.removeCallbacks(it) }
         currentIndex = index
         val channel = allChannels[index]
         exoPlayer?.apply {
@@ -508,6 +528,33 @@ class MainActivity : AppCompatActivity() {
         }
         showOsd(channel)
         updatePresenceChannel(channel.id)
+    }
+
+    /**
+     * El canal no se puede reproducir: se reintenta unas pocas veces (por
+     * si es un corte momentáneo) y, si sigue fallando, se avisa en
+     * pantalla en lugar de dejarla en negro reintentando para siempre.
+     */
+    private fun onPlaybackFailed() {
+        val failedIndex = currentIndex
+        if (failedIndex !in allChannels.indices) return
+        if (playbackRetries < MAX_PLAYBACK_RETRIES) {
+            playbackRetries++
+            val runnable = Runnable {
+                if (currentIndex == failedIndex) startPlayback(failedIndex)
+            }
+            retryRunnable = runnable
+            handler.postDelayed(runnable, PLAYBACK_RETRY_DELAY_MS)
+        } else {
+            showChannelUnavailable(allChannels[failedIndex])
+        }
+    }
+
+    private fun showChannelUnavailable(channel: Channel) {
+        osdHideRunnable?.let { handler.removeCallbacks(it) }
+        osdNumber.text = ""
+        osdName.text = "${channel.name}: canal no disponible ahora. Prueba otro con CH+ / CH−."
+        osdContainer.visibility = View.VISIBLE
     }
 
     // Al cambiar de canal con el mando (CH+/CH-), nos quedamos siempre
@@ -562,16 +609,7 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
             KeyEvent.KEYCODE_BACK -> {
-                if (categoriesColumn.visibility == View.VISIBLE || channelsList.visibility == View.VISIBLE) {
-                    hideChannelBrowser()
-                }
-                // Antes, si se pulsaba "atrás" mientras solo se estaba
-                // viendo un canal (sin el buscador abierto), Android
-                // cerraba la aplicación entera sin avisar — esto es lo
-                // que pasaba cuando, cambiando de canal con el mando, se
-                // rozaba sin querer el botón de atrás. Ahora lo
-                // "absorbemos" siempre aquí para que nunca cierre la app
-                // sola mientras se está viendo la televisión.
+                handleBackOnMainSection()
                 return true
             }
             KeyEvent.KEYCODE_DPAD_UP -> {
@@ -600,12 +638,29 @@ class MainActivity : AppCompatActivity() {
     // tele) nunca dejamos que cierre la aplicación sola.
     override fun onBackPressed() {
         if (mainSection.visibility == View.VISIBLE) {
-            if (categoriesColumn.visibility == View.VISIBLE || channelsList.visibility == View.VISIBLE) {
-                hideChannelBrowser()
-            }
+            handleBackOnMainSection()
             return
         }
         super.onBackPressed()
+    }
+
+    /**
+     * "Atrás" con la lista abierta la cierra. Viendo la tele, un solo
+     * toque ya no cierra la app (se rozaba sin querer al hacer zapping):
+     * hay que pulsarlo dos veces seguidas. Antes no se podía salir nunca.
+     */
+    private fun handleBackOnMainSection() {
+        if (categoriesColumn.visibility == View.VISIBLE || channelsList.visibility == View.VISIBLE) {
+            hideChannelBrowser()
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastBackPressAt < EXIT_CONFIRM_WINDOW_MS) {
+            finish()
+        } else {
+            lastBackPressAt = now
+            Toast.makeText(this, "Pulsa atrás otra vez para salir", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun onDigitEntered(digit: Int) {
@@ -640,12 +695,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startPresenceHeartbeat() {
+        // Se quita el aviso anterior: si no, cada recarga de canales
+        // arrancaba otro más y el contador "en línea" salía inflado.
+        presenceRunnable?.let { handler.removeCallbacks(it) }
         val runnable = object : Runnable {
             override fun run() {
                 val currentSession = session ?: return
                 val channelId = allChannels.getOrNull(currentIndex)?.id
                 lifecycleScope.launch { presenceRepository.ping(currentSession, channelId) }
-                handler.postDelayed(this, 20000)
+                handler.postDelayed(this, PRESENCE_INTERVAL_MS)
             }
         }
         presenceRunnable = runnable
@@ -687,21 +745,30 @@ class MainActivity : AppCompatActivity() {
         textView.visibility = View.VISIBLE
     }
 
+    // Con la app en segundo plano (botón Inicio) se para todo: el vídeo,
+    // los avisos de "en línea" y la recarga de canales. Antes seguían en
+    // marcha y el panel contaba como conectadas teles que no la usaban.
     override fun onStop() {
         super.onStop()
-        exoPlayer?.playWhenReady = false
+        exoPlayer?.stop()
+        retryRunnable?.let { handler.removeCallbacks(it) }
+        presenceRunnable?.let { handler.removeCallbacks(it) }
+        channelRefreshRunnable?.let { handler.removeCallbacks(it) }
     }
 
     override fun onStart() {
         super.onStart()
         if (currentIndex in allChannels.indices) {
             playChannel(currentIndex)
+            startPresenceHeartbeat()
+            startChannelAutoRefresh()
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         presenceRunnable?.let { handler.removeCallbacks(it) }
+        retryRunnable?.let { handler.removeCallbacks(it) }
         osdHideRunnable?.let { handler.removeCallbacks(it) }
         numberEntryRunnable?.let { handler.removeCallbacks(it) }
         channelRefreshRunnable?.let { handler.removeCallbacks(it) }
