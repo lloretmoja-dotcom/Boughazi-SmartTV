@@ -59,6 +59,8 @@ SEGUNDA_ESPERA_SEGUNDOS = 3  # pausa antes del segundo intento, por si el corte 
 DIAS_ANTES_DE_BORRAR = 7  # días seguidos caído antes de borrarlo para siempre
 PORCENTAJE_MAXIMO_CAIDOS = 30  # si falla más que esto, no se toca nada (freno de seguridad)
 MINIMO_CANALES_PARA_FRENO = 20  # con muy pocos canales el porcentaje no dice nada
+ESPERA_MAXIMA_CONGELADO = 12  # segundos que se espera para ver si un directo avanza
+TANDA_ACTUALIZACION = 200  # ids por petición al marcar/borrar en Supabase
 
 
 def _now_iso():
@@ -79,7 +81,7 @@ async def fetch_all_channels(session):
     while True:
         url = (
             f"{SUPABASE_URL}/rest/v1/bt_channels"
-            "?select=id,name,stream_url,channel_number,is_broken,last_checked_at"
+            "?select=id,name,category,stream_url,channel_number,is_broken,last_checked_at"
         )
         headers = {
             **_headers(),
@@ -170,73 +172,127 @@ def _analizar_playlist(texto):
     return (siguiente is not None), None
 
 
+class Fallo(Exception):
+    """Un canal que no funciona, con el motivo concreto que se guarda en
+    el informe del panel ("Centro de control")."""
+
+    def __init__(self, tipo, detalle):
+        super().__init__(detalle)
+        self.tipo = tipo  # error_http, sin_respuesta, bucle, vacio, congelado
+        self.detalle = detalle
+
+
 async def _descargar(session, url, headers):
-    """Descarga el principio de un enlace. Devuelve (ok, content_type,
-    texto_o_None) — texto_o_None es None si no se pudo leer como texto."""
+    """Descarga el principio de un enlace. Devuelve (content_type, texto)
+    o lanza Fallo con el motivo exacto (error 404/500, redirecciones en
+    bucle, el servidor no contesta…)."""
     try:
         timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
-        async with session.get(url, timeout=timeout, allow_redirects=True, headers=headers) as resp:
+        async with session.get(
+            url, timeout=timeout, allow_redirects=True, max_redirects=5, headers=headers
+        ) as resp:
             if not resp.ok:
-                return False, None, None
+                raise Fallo("error_http", f"El servidor contesta con el error {resp.status}")
             content_type = resp.headers.get("Content-Type", "")
             raw = await resp.content.read(CONTENT_CHECK_BYTES)
-            texto = raw.decode("utf-8", errors="ignore")
-            return True, content_type, texto
-    except Exception:
-        return False, None, None
+            return content_type, raw.decode("utf-8", errors="ignore")
+    except Fallo:
+        raise
+    except aiohttp.TooManyRedirects:
+        raise Fallo("bucle", "El enlace redirige en bucle sin llegar nunca al vídeo")
+    except asyncio.TimeoutError:
+        raise Fallo("sin_respuesta", f"No contesta en {REQUEST_TIMEOUT_SECONDS} segundos")
+    except Exception as e:  # noqa: BLE001 — cualquier fallo de red cuenta como caído
+        raise Fallo("sin_respuesta", f"No se puede conectar ({e.__class__.__name__})")
+
+
+def _estado_directo(texto):
+    """De una lista final de un directo saca lo que cambia cuando el vídeo
+    avanza: el número de secuencia y el último trozo. Si es un vídeo
+    grabado (#EXT-X-ENDLIST) devuelve None: no tiene por qué avanzar."""
+    lineas = [l.strip() for l in texto.splitlines() if l.strip()]
+    if any(l.upper().startswith("#EXT-X-ENDLIST") for l in lineas):
+        return None, None
+    secuencia = next(
+        (l.split(":", 1)[1] for l in lineas if l.upper().startswith("#EXT-X-MEDIA-SEQUENCE:")), ""
+    )
+    duracion = next(
+        (l.split(":", 1)[1] for l in lineas if l.upper().startswith("#EXT-X-TARGETDURATION:")), "6"
+    )
+    trozos = [l for l in lineas if not l.startswith("#")]
+    try:
+        espera = min(max(float(duracion) * 1.5, 4), ESPERA_MAXIMA_CONGELADO)
+    except ValueError:
+        espera = 9
+    return (secuencia, trozos[-1] if trozos else ""), espera
 
 
 async def _comprobar_contenido(session, url, headers, saltos_restantes=2):
     """Comprueba que un enlace de verdad sirve contenido de vídeo real,
     no solo que "conecta" (HTTP 200). Sigue una lista maestra hasta la
-    lista final si hace falta, con un límite de saltos por seguridad."""
-    ok, content_type, texto = await _descargar(session, url, headers)
-    if not ok:
-        return False
+    lista final si hace falta, con un límite de saltos por seguridad.
+    En los directos, además, vuelve a mirar la lista un poco después para
+    ver si avanza: si sigue exactamente igual, la emisión está congelada.
+    Si algo falla, lanza Fallo con el motivo."""
+    content_type, texto = await _descargar(session, url, headers)
 
     if _es_lista_m3u(url) or (texto or "").strip().upper().startswith("#EXTM3U"):
         es_valida, url_a_seguir = _analizar_playlist(texto or "")
         if not es_valida:
-            return False
+            raise Fallo("vacio", "La lista no tiene vídeo (vacía o es una página de error)")
         if url_a_seguir:
             if saltos_restantes <= 0:
-                return False
+                raise Fallo("bucle", "Listas que apuntan a otras listas sin llegar nunca al vídeo")
             # La dirección de la siguiente lista puede venir en forma
             # relativa ("/algo.m3u8") — hay que unirla con la dirección
             # base para que sea una dirección completa de verdad.
             siguiente_url = urllib.parse.urljoin(url, url_a_seguir)
             return await _comprobar_contenido(session, siguiente_url, headers, saltos_restantes - 1)
-        return True
+
+        estado, espera = _estado_directo(texto)
+        if estado is not None:
+            await asyncio.sleep(espera)
+            _, texto_despues = await _descargar(session, url, headers)
+            estado_despues, _ = _estado_directo(texto_despues)
+            if estado_despues == estado:
+                raise Fallo("congelado", f"La emisión no avanza (igual tras {espera:.0f} segundos)")
+        return
 
     # Vídeo directo (no .m3u8): si el "content-type" es una página web
     # normal en vez de vídeo/audio, es casi seguro un error disfrazado.
     content_type = (content_type or "").lower()
     if "text/html" in content_type or "application/json" in content_type:
-        return False
-    return len(texto or "") > 32
+        raise Fallo("vacio", "Devuelve una página web en vez de vídeo")
+    if len(texto or "") <= 32:
+        raise Fallo("vacio", "No devuelve vídeo")
 
 
 async def check_one(session, sem, channel):
-    """Devuelve True si el canal responde bien Y de verdad sirve
+    """Devuelve None si el canal responde bien Y de verdad sirve
     contenido real (no una página de error, ni una lista vacía
-    disfrazada de "200 OK"). Se hace un segundo intento (con una
-    pequeña espera) antes de dar un canal por caído de verdad, por si
-    ha sido solo un corte momentáneo."""
+    disfrazada de "200 OK", ni un directo congelado), o el Fallo con el
+    motivo si no. Se hace un segundo intento (con una pequeña espera)
+    antes de dar un canal por caído de verdad, por si ha sido solo un
+    corte momentáneo."""
     url = (channel.get("stream_url") or "").strip()
     if not url.startswith("http"):
-        return False
+        return Fallo("vacio", "El enlace no empieza por http:// o https://")
 
     headers = {"User-Agent": PLAYER_USER_AGENT}
 
     async def attempt():
         try:
-            return await _comprobar_contenido(session, url, headers)
-        except Exception:
-            return False
+            await _comprobar_contenido(session, url, headers)
+            return None
+        except Fallo as f:
+            return f
+        except Exception as e:  # noqa: BLE001
+            return Fallo("sin_respuesta", f"Fallo inesperado ({e.__class__.__name__})")
 
     async with sem:
-        if await attempt():
-            return True
+        fallo = await attempt()
+    if fallo is None:
+        return None
 
     await asyncio.sleep(SEGUNDA_ESPERA_SEGUNDOS)
 
@@ -244,41 +300,41 @@ async def check_one(session, sem, channel):
         return await attempt()
 
 
+async def _en_tandas(session, sem, metodo, ids, payload=None):
+    """Hace la misma operación sobre muchos canales con pocas peticiones
+    (TANDA_ACTUALIZACION ids en cada una) en vez de una por canal: con
+    miles de canales, antes eran miles de peticiones a Supabase en cada
+    comprobación."""
+    headers = {**_headers(), "Content-Type": "application/json", "Prefer": "return=minimal"}
+
+    async def una_tanda(tanda):
+        url = f"{SUPABASE_URL}/rest/v1/bt_channels?id=in.({','.join(str(i) for i in tanda)})"
+        async with sem:
+            async with session.request(metodo, url, headers=headers, json=payload) as resp:
+                if resp.status not in (200, 204):
+                    body = await resp.text()
+                    print(f"  ! Fallo al actualizar {len(tanda)} canales: HTTP {resp.status} — {body}")
+
+    tandas = [ids[i:i + TANDA_ACTUALIZACION] for i in range(0, len(ids), TANDA_ACTUALIZACION)]
+    await asyncio.gather(*(una_tanda(t) for t in tandas))
+
+
 async def delete_channels(session, sem, ids, motivo):
     """Borra canales PARA SIEMPRE de la base de datos — no los oculta,
     los elimina de verdad, sin dejar rastro."""
     if not ids:
         return
-
-    async def delete_one(cid):
-        url = f"{SUPABASE_URL}/rest/v1/bt_channels?id=eq.{cid}"
-        async with sem:
-            async with session.delete(url, headers=_headers()) as resp:
-                if resp.status not in (200, 204):
-                    body = await resp.text()
-                    print(f"  ! No se pudo borrar el canal {cid}: HTTP {resp.status} — {body}")
-
-    await asyncio.gather(*(delete_one(cid) for cid in ids))
+    await _en_tandas(session, sem, "DELETE", list(ids))
     print(f"Borrados para siempre ({motivo}): {len(ids)}")
 
 
 async def mark_checked(session, sem, ids):
     """A los canales que SÍ funcionan se les anota la fecha de la
-    última comprobación, para el aviso del panel de administración."""
+    última comprobación, para el aviso del panel de administración (y si
+    estaban marcados como caídos, vuelven a aparecer en la app)."""
     if not ids:
         return
-
-    async def touch(cid):
-        url = f"{SUPABASE_URL}/rest/v1/bt_channels?id=eq.{cid}"
-        headers = {**_headers(), "Content-Type": "application/json", "Prefer": "return=minimal"}
-        payload = {"is_broken": False, "last_checked_at": _now_iso()}
-        async with sem:
-            async with session.patch(url, headers=headers, json=payload) as resp:
-                if resp.status not in (200, 204):
-                    body = await resp.text()
-                    print(f"  ! No se pudo actualizar el canal {cid}: HTTP {resp.status} — {body}")
-
-    await asyncio.gather(*(touch(cid) for cid in ids))
+    await _en_tandas(session, sem, "PATCH", list(ids), {"is_broken": False, "last_checked_at": _now_iso()})
 
 
 async def mark_broken(session, sem, ids):
@@ -287,18 +343,43 @@ async def mark_broken(session, sem, ids):
     el canal funcionó, y se sabe cuántos días lleva caído."""
     if not ids:
         return
-
-    async def flag(cid):
-        url = f"{SUPABASE_URL}/rest/v1/bt_channels?id=eq.{cid}"
-        headers = {**_headers(), "Content-Type": "application/json", "Prefer": "return=minimal"}
-        async with sem:
-            async with session.patch(url, headers=headers, json={"is_broken": True}) as resp:
-                if resp.status not in (200, 204):
-                    body = await resp.text()
-                    print(f"  ! No se pudo marcar como caído el canal {cid}: HTTP {resp.status} — {body}")
-
-    await asyncio.gather(*(flag(cid) for cid in ids))
+    await _en_tandas(session, sem, "PATCH", list(ids), {"is_broken": True})
     print(f"Marcados como caídos (ocultos en la app, no borrados): {len(ids)}")
+
+
+async def guardar_informe(session, resumen, eventos):
+    """Guarda el resultado de esta comprobación para el "Centro de control"
+    del panel (tablas bt_health_runs y bt_health_events). Si las tablas aún
+    no existen (falta ejecutar el SQL), se avisa y se sigue: el informe es
+    un extra, no debe impedir que se limpien los canales."""
+    headers = {**_headers(), "Content-Type": "application/json", "Prefer": "return=representation"}
+    async with session.post(f"{SUPABASE_URL}/rest/v1/bt_health_runs", headers=headers, json=resumen) as resp:
+        if resp.status not in (200, 201):
+            print(f"(No se ha guardado el informe para el panel: HTTP {resp.status}. ¿Falta ejecutar el SQL?)")
+            return
+        run_id = (await resp.json())[0]["id"]
+    # Borra los informes de hace más de 30 días (función del SQL).
+    async with session.post(f"{SUPABASE_URL}/rest/v1/rpc/bt_health_cleanup", headers=_headers(), json={}):
+        pass
+    headers["Prefer"] = "return=minimal"
+    filas = [{**e, "run_id": run_id} for e in eventos]
+    for i in range(0, len(filas), 500):
+        async with session.post(
+            f"{SUPABASE_URL}/rest/v1/bt_health_events", headers=headers, json=filas[i:i + 500]
+        ) as resp:
+            if resp.status not in (200, 201):
+                print(f"(No se han guardado todos los detalles del informe: HTTP {resp.status})")
+                return
+
+
+def _evento(channel, tipo, detalle):
+    return {
+        "channel_id": str(channel["id"]),
+        "channel_name": channel.get("name"),
+        "category": channel.get("category"),
+        "event": tipo,
+        "detail": detalle,
+    }
 
 
 def _lleva_caido_demasiado(channel, ahora):
@@ -327,6 +408,7 @@ async def main():
         )
         sys.exit(1)
 
+    inicio = _now_iso()
     connector = aiohttp.TCPConnector(limit=CONCURRENCY)
     async with aiohttp.ClientSession(connector=connector) as session:
         print("Descargando la lista completa de canales…")
@@ -339,6 +421,10 @@ async def main():
         # antes incluso de comprobar si funcionan, porque son sobrantes
         # sin más.
         duplicate_ids = find_duplicates(channels)
+        por_id = {c["id"]: c for c in channels}
+        eventos = [
+            _evento(por_id[i], "duplicado", "Mismo enlace que otro canal: borrado") for i in duplicate_ids
+        ]
         if duplicate_ids:
             print(f"\nCanales duplicados encontrados: {len(duplicate_ids)}")
             await delete_channels(session, sem, duplicate_ids, "duplicados")
@@ -351,14 +437,21 @@ async def main():
         print(f"\nComprobando si funcionan de verdad {len(channels)} canales…")
         results = await asyncio.gather(*(check_one(session, sem, ch) for ch in channels))
 
-        dead = [ch for ch, alive in zip(channels, results) if not alive]
-        alive_ids = [ch["id"] for ch, alive in zip(channels, results) if alive]
+        fallos = {ch["id"]: f for ch, f in zip(channels, results) if f is not None}
+        dead = [ch for ch in channels if ch["id"] in fallos]
+        alive = [ch for ch in channels if ch["id"] not in fallos]
+        alive_ids = [ch["id"] for ch in alive]
 
         # Freno de seguridad: si falla una parte enorme de golpe, el
         # problema casi seguro no son los canales. No se toca nada.
         if len(channels) >= MINIMO_CANALES_PARA_FRENO:
             porcentaje = 100 * len(dead) / len(channels)
             if porcentaje > PORCENTAJE_MAXIMO_CAIDOS:
+                await guardar_informe(session, {
+                    "started_at": inicio, "finished_at": _now_iso(), "total": len(channels),
+                    "ok": len(alive_ids), "broken": len(dead), "aborted": True,
+                    "note": f"Freno de seguridad: fallaban {porcentaje:.0f} % de los canales, no se ha tocado nada",
+                }, [])
                 print(
                     f"\nFRENO DE SEGURIDAD: han fallado {len(dead)} de {len(channels)} canales "
                     f"({porcentaje:.0f} %), más del {PORCENTAJE_MAXIMO_CAIDOS} %. Seguramente es un "
@@ -372,10 +465,20 @@ async def main():
         to_delete_ids = {ch["id"] for ch in to_delete}
         to_flag = [ch for ch in dead if ch["id"] not in to_delete_ids and not ch.get("is_broken")]
 
+        for ch in to_flag:
+            f = fallos[ch["id"]]
+            eventos.append(_evento(ch, f.tipo, f"{f.detalle}: ocultado en la app"))
+        for ch in to_delete:
+            f = fallos[ch["id"]]
+            eventos.append(_evento(ch, "borrado", f"{f.detalle}; más de {DIAS_ANTES_DE_BORRAR} días caído: borrado"))
+        for ch in alive:
+            if ch.get("is_broken"):
+                eventos.append(_evento(ch, "recuperado", "Vuelve a funcionar: visible otra vez en la app"))
+
         if dead:
             print(f"\nCanales que no responden hoy: {len(dead)}")
             for ch in dead:
-                print(f"  - {ch.get('name')} ({ch['id']})")
+                print(f"  - {ch.get('name')} ({ch['id']}): {fallos[ch['id']].detalle}")
             await mark_broken(session, sem, [ch["id"] for ch in to_flag])
             await delete_channels(
                 session, sem, list(to_delete_ids), f"más de {DIAS_ANTES_DE_BORRAR} días caídos"
@@ -386,6 +489,13 @@ async def main():
         # 3) A los que sí funcionan se les anota cuándo se comprobaron
         # (y si estaban marcados como caídos, vuelven a aparecer en la app).
         await mark_checked(session, sem, alive_ids)
+
+        await guardar_informe(session, {
+            "started_at": inicio, "finished_at": _now_iso(), "total": len(channels) + len(duplicate_ids),
+            "ok": len(alive_ids), "broken": len(dead), "hidden": len(to_flag),
+            "deleted": len(to_delete_ids) + len(duplicate_ids),
+            "restored": sum(1 for ch in alive if ch.get("is_broken")), "aborted": False,
+        }, eventos)
 
         print("\nResumen final:")
         print(f"  Duplicados borrados: {len(duplicate_ids)}")
