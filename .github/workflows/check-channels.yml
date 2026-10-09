@@ -1,16 +1,25 @@
 name: Comprobar canales caídos
 
-# Se ejecuta ella sola todas las noches, y también se puede lanzar a
-# mano cuando se quiera desde la pestaña "Actions" de GitHub (botón
-# "Run workflow"), sin tener que esperar a la noche.
+# Vigilancia automática de los canales: se ejecuta sola CADA HORA (y se
+# puede lanzar a mano desde la pestaña "Actions", botón "Run workflow").
+# A las 3 de la mañana, además, vuelve a importar las "Listas automáticas"
+# del panel antes de comprobar los canales.
 on:
   schedule:
     - cron: '0 3 * * *'
+    - cron: '30 * * * *'
   workflow_dispatch:
+
+# Si una comprobación tarda más de una hora, la siguiente espera a que
+# termine en vez de pisarse con ella.
+concurrency:
+  group: comprobar-canales
+  cancel-in-progress: false
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 55
     steps:
       - name: Descargar el código del repositorio
         uses: actions/checkout@v4
@@ -23,7 +32,13 @@ jobs:
       - name: Instalar la librería necesaria
         run: pip install aiohttp
 
-      - name: Comprobar todos los canales y borrar los caídos/duplicados para siempre
+      - name: Importar los canales nuevos de las listas automáticas
+        if: github.event.schedule == '0 3 * * *' || github.event_name == 'workflow_dispatch'
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python scripts/import_sources.py
+
+      - name: Comprobar todos los canales, ocultar los caídos y guardar el informe
         env:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: python scripts/check_channels.py

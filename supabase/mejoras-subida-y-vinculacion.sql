@@ -19,6 +19,8 @@
 --      o Xtream Codes) y la tele la recibe sola en unos segundos.
 --   4) Listas automáticas: enlaces que el script de cada noche vuelve a
 --      importar solo, añadiendo los canales nuevos.
+--   5) Informes de la vigilancia automática de canales (cada hora), que se
+--      ven en el "Centro de control" del panel.
 --
 -- Supone que ya existen las tablas bt_channels, bt_presence y la función
 -- bt_is_admin() que usa el panel.
@@ -284,3 +286,62 @@ create policy "bt_auto_sources_solo_admin" on public.bt_auto_sources
   for all to authenticated
   using (public.bt_is_admin())
   with check (public.bt_is_admin());
+
+
+-- ---------------------------------------------------------------------
+-- 5. Informes de la vigilancia automática de canales ("Centro de control")
+-- ---------------------------------------------------------------------
+-- Cada comprobación (cada hora) guarda un resumen en bt_health_runs y, en
+-- bt_health_events, qué ha hecho con cada canal que ha cambiado: ocultado
+-- (y por qué: error 404/500, no contesta, bucle, vacío, congelado),
+-- borrado, recuperado o duplicado. Solo el administrador puede leerlos;
+-- los escribe el script con la clave secreta.
+create table if not exists public.bt_health_runs (
+  id          bigint generated always as identity primary key,
+  started_at  timestamptz not null,
+  finished_at timestamptz,
+  total       int not null default 0,
+  ok          int not null default 0,
+  broken      int not null default 0,
+  hidden      int not null default 0,
+  deleted     int not null default 0,
+  restored    int not null default 0,
+  aborted     boolean not null default false,
+  note        text
+);
+create index if not exists bt_health_runs_recientes on public.bt_health_runs (started_at desc);
+
+create table if not exists public.bt_health_events (
+  id           bigint generated always as identity primary key,
+  run_id       bigint not null references public.bt_health_runs (id) on delete cascade,
+  created_at   timestamptz not null default now(),
+  channel_id   text,
+  channel_name text,
+  category     text,
+  event        text not null,
+  detail       text
+);
+create index if not exists bt_health_events_por_run on public.bt_health_events (run_id);
+create index if not exists bt_health_events_recientes on public.bt_health_events (created_at desc);
+
+alter table public.bt_health_runs enable row level security;
+alter table public.bt_health_events enable row level security;
+
+drop policy if exists "bt_health_runs_admin_lee" on public.bt_health_runs;
+create policy "bt_health_runs_admin_lee" on public.bt_health_runs
+  for select to authenticated using (public.bt_is_admin());
+drop policy if exists "bt_health_events_admin_lee" on public.bt_health_events;
+create policy "bt_health_events_admin_lee" on public.bt_health_events
+  for select to authenticated using (public.bt_is_admin());
+
+-- Los informes de más de 30 días se borran solos en cada comprobación
+-- (el script llama a esta función), para que la tabla no crezca sin fin.
+create or replace function public.bt_health_cleanup()
+returns void
+language sql
+security definer
+set search_path = public
+as $$
+  delete from bt_health_runs where started_at < now() - interval '30 days';
+$$;
+revoke all on function public.bt_health_cleanup() from public, anon, authenticated;
