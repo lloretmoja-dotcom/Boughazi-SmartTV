@@ -37,8 +37,13 @@ create index if not exists bt_channels_activos_por_numero
 create index if not exists bt_channels_por_categoria
   on public.bt_channels (category);
 -- Importar sin duplicados y comprobación nocturna (buscar por enlace).
-create index if not exists bt_channels_por_enlace
-  on public.bt_channels (stream_url);
+-- Índice "hash": algunos enlaces son tan largos (miles de letras) que no
+-- caben en un índice normal y Supabase daba el error "index row size
+-- exceeds btree maximum". El índice hash guarda solo una huella del
+-- enlace, así que admite enlaces de cualquier tamaño.
+drop index if exists public.bt_channels_por_enlace;
+create index if not exists bt_channels_por_enlace_hash
+  on public.bt_channels using hash (stream_url);
 -- "Última comprobación automática" del panel.
 create index if not exists bt_channels_ultima_comprobacion
   on public.bt_channels (last_checked_at desc nulls last);
