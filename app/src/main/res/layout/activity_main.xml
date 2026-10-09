@@ -425,12 +425,30 @@
                 android:textSize="14sp"
                 android:visibility="gone" />
 
+            <!-- Abre la pantalla "Vincular por código". Está arriba del
+                 todo de la columna: desde el primer país, pulsando
+                 "arriba" en el mando se llega a este botón. -->
+            <Button
+                android:id="@+id/openPairingBtn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="8dp"
+                android:text="Vincular por código"
+                android:textAllCaps="false"
+                android:background="@drawable/text_button_selector"
+                android:textColor="@color/accent_orange"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/categoriesList" />
+
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/categoriesList"
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
                 android:layout_weight="1"
-                android:paddingTop="24dp" />
+                android:paddingTop="8dp" />
         </LinearLayout>
 
         <!-- Canales de la categoría elegida -->
@@ -497,6 +515,95 @@
             android:layout_height="wrap_content"
             android:layout_gravity="bottom"
             android:background="#0B0E14" />
+
+        <!-- ============ VINCULAR POR CÓDIGO (Web Pairing) ============
+             Pantalla que tapa todo: enseña un código grande para
+             escribirlo en el panel de administración junto con la lista
+             de canales. "Atrás" la cierra. -->
+        <LinearLayout
+            android:id="@+id/pairingSection"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:padding="48dp"
+            android:background="#F20B0E14"
+            android:clickable="true"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Vincular por código"
+                android:textColor="@color/white"
+                android:textSize="26sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="12dp" />
+
+            <TextView
+                android:layout_width="560dp"
+                android:layout_height="wrap_content"
+                android:text="Escribe este código en el panel de administración junto con la lista de canales"
+                android:textColor="@color/muted_gray"
+                android:textSize="18sp"
+                android:gravity="center"
+                android:layout_marginBottom="24dp" />
+
+            <TextView
+                android:id="@+id/pairingCodeText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="…"
+                android:textColor="@color/accent_orange"
+                android:textSize="72sp"
+                android:textStyle="bold"
+                android:typeface="monospace"
+                android:letterSpacing="0.15"
+                android:layout_marginBottom="16dp" />
+
+            <TextView
+                android:id="@+id/pairingStatusText"
+                android:layout_width="560dp"
+                android:layout_height="wrap_content"
+                android:textColor="@color/muted_gray"
+                android:textSize="16sp"
+                android:gravity="center"
+                android:layout_marginBottom="16dp" />
+
+            <TextView
+                android:id="@+id/pairingLinkedText"
+                android:layout_width="560dp"
+                android:layout_height="wrap_content"
+                android:textColor="@color/white"
+                android:textSize="16sp"
+                android:gravity="center"
+                android:layout_marginBottom="12dp"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/pairingUnlinkBtn"
+                android:layout_width="320dp"
+                android:layout_height="wrap_content"
+                android:text="Volver a la lista oficial"
+                android:textAllCaps="false"
+                android:background="@drawable/text_button_selector"
+                android:textColor="@color/accent_orange"
+                android:layout_marginBottom="4dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/pairingCloseBtn"
+                android:layout_width="320dp"
+                android:layout_height="wrap_content"
+                android:text="Cerrar"
+                android:textAllCaps="false"
+                android:background="@drawable/text_button_selector"
+                android:textColor="@color/muted_gray"
+                android:focusable="true"
+                android:focusableInTouchMode="true" />
+        </LinearLayout>
     </FrameLayout>
 
 </FrameLayout>
