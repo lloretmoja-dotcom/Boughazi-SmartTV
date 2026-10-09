@@ -55,6 +55,44 @@ jobs:
           echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/boughazi.keystore"
           echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/boughazi.keystore" >> "$GITHUB_ENV"
 
+      # Comprueba los secretos de la firma antes de compilar y dice cuál
+      # está mal. Solo escribe "correcta" o "incorrecta", nunca el valor.
+      - name: Comprobar los secretos de la firma
+        if: env.ANDROID_KEYSTORE_PATH != ''
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          STORE_PASS="$(printf '%s' "$ANDROID_KEYSTORE_PASSWORD" | tr -d '[:space:]')"
+          KEY_ALIAS="$(printf '%s' "$ANDROID_KEY_ALIAS" | tr -d '[:space:]')"
+          KEY_PASS="$(printf '%s' "$ANDROID_KEY_PASSWORD" | tr -d '[:space:]')"
+          ok=1
+          if keytool -list -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$STORE_PASS" > /dev/null 2>&1; then
+            echo "ANDROID_KEYSTORE_PASSWORD: correcta"
+          else
+            echo "::error::El secreto ANDROID_KEYSTORE_PASSWORD no es la contraseña de la firma. Vuelve a pegarlo."
+            ok=0
+          fi
+          if [ "$ok" = 1 ]; then
+            if keytool -list -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$STORE_PASS" -alias "$KEY_ALIAS" > /dev/null 2>&1; then
+              echo "ANDROID_KEY_ALIAS: correcto"
+            else
+              echo "::error::El secreto ANDROID_KEY_ALIAS no coincide con la firma (debe ser boughazi)."
+              ok=0
+            fi
+          fi
+          if [ "$ok" = 1 ]; then
+            if keytool -exportcert -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$STORE_PASS" -alias "$KEY_ALIAS" -keypass "$KEY_PASS" > /dev/null 2>&1 \
+               && [ "$KEY_PASS" = "$STORE_PASS" ]; then
+              echo "ANDROID_KEY_PASSWORD: correcta"
+            else
+              echo "::error::El secreto ANDROID_KEY_PASSWORD no es la contraseña de la firma. Vuelve a pegarlo (es la misma que ANDROID_KEYSTORE_PASSWORD)."
+              ok=0
+            fi
+          fi
+          [ "$ok" = 1 ]
+
       - name: Instalar Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
