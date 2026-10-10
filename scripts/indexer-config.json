@@ -1,0 +1,8 @@
+{
+  "countries": [],
+  "extra_m3u_sources": [],
+  "exclude_nsfw": true,
+  "max_new_per_run": 0,
+  "check_timeout_seconds": 5,
+  "check_concurrency": 64
+}

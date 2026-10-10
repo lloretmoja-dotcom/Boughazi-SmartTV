@@ -1,0 +1,8 @@
+{
+  "name": "boughazi-indexer",
+  "private": true,
+  "description": "Robot diario de canales de Boughazi-TV (ver massive_indexer.js)",
+  "dependencies": {
+    "nodemailer": "^6.9.16"
+  }
+}
