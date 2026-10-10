@@ -1,0 +1,47 @@
+name: Robot diario de canales
+
+# Busca canales nuevos en las listas públicas de canales en abierto,
+# prueba que emiten, quita los repetidos, los sube a Supabase y manda un
+# informe a Gmail. Se ejecuta solo cada día a las 04:00 UTC (una hora
+# después del revisor nocturno "Comprobar canales caídos") y también se
+# puede lanzar a mano desde la pestaña "Actions" → "Run workflow".
+#
+# Secretos que usa (Settings → Secrets and variables → Actions):
+#   SUPABASE_SERVICE_ROLE_KEY  (obligatorio, el mismo del revisor nocturno)
+#   GMAIL_USER                 (tu dirección de Gmail)
+#   GMAIL_APP_PASSWORD         (contraseña de aplicación de Google, 16 letras)
+#   NOTIFICATION_EMAIL         (opcional: a quién mandar el informe; si no, a GMAIL_USER)
+#   SUPABASE_URL               (opcional)
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: daily-indexer
+  cancel-in-progress: false
+
+jobs:
+  run-indexer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Descargar el código del repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Instalar dependencias
+        run: npm install --prefix scripts --no-audit --no-fund
+
+      - name: Buscar, probar y subir canales
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASS: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+        run: node scripts/massive_indexer.js

@@ -4,3 +4,4 @@ __pycache__/
 local.properties
 .gradle/
 build/
+scripts/node_modules/
