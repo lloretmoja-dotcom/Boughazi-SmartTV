@@ -47,7 +47,7 @@ class ChannelRepository {
                 val url = URL(
                     "${SupabaseConfig.URL}/rest/v1/bt_channels" +
                         "?select=id,channel_number,name,category,logo_url,stream_url,is_broken" +
-                        "&is_broken=eq.false" +
+                        "&is_broken=not.is.true" +
                         "&order=channel_number.asc.nullslast"
                 )
                 val conn = url.openConnection() as HttpURLConnection

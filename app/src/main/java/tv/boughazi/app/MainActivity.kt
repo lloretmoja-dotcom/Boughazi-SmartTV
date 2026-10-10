@@ -365,7 +365,7 @@ class MainActivity : AppCompatActivity() {
                 updateDebugInfo(allChannels.size, categories.size, result.totalReportedByServer)
 
                 categoriesList.adapter = RowAdapter(
-                    categories.map { RowItem(title = it) }
+                    categories.map { RowItem(flag = CountryFlags.flagFor(it), title = it) }
                 ) { position -> onCategorySelected(categories[position]) }
 
                 // Si la persona tiene abierta la lista de canales de un país
@@ -422,7 +422,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 categoriesList.adapter = RowAdapter(
-                    categories.map { RowItem(title = it) }
+                    categories.map { RowItem(flag = CountryFlags.flagFor(it), title = it) }
                 ) { position -> onCategorySelected(categories[position]) }
 
                 updateDebugInfo(allChannels.size, categories.size, result.totalReportedByServer)
