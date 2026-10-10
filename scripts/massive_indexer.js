@@ -617,6 +617,38 @@ async function sendEmail({ subject, text, html }) {
   console.log(`Informe enviado a ${to}.`);
 }
 
+/* Guarda el resumen de la pasada en bt_robot_runs para que el panel lo
+   enseñe. Si la tabla aún no existe (falta supabase/robot-panel.sql), no
+   pasa nada: solo se avisa en el registro. */
+async function saveRun(report, status, error) {
+  if (!SUPABASE_KEY || DRY_RUN) return;
+  const row = {
+    started_at: report.startedAt.toISOString(),
+    finished_at: new Date().toISOString(),
+    status,
+    analyzed: report.analyzed,
+    tested: report.tested,
+    added: report.added,
+    repaired: report.repaired,
+    no_signal: report.noSignal,
+    total_in_db: report.totalInDb,
+    broken_in_db: report.brokenInDb,
+    sources: report.sources,
+    by_country: [...report.byCountry.values()],
+    note: error ? error.message : report.notes.join(" ") || null,
+  };
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/bt_robot_runs`, {
+      method: "POST",
+      headers: sbHeaders({ Prefer: "return=minimal" }),
+      body: JSON.stringify(row),
+    });
+    if (!res.ok) console.log(`No se guardó la pasada en bt_robot_runs (HTTP ${res.status}): ${await res.text()}`);
+  } catch (err) {
+    console.log(`No se guardó la pasada en bt_robot_runs: ${err.message}`);
+  }
+}
+
 function writeJobSummary({ text }) {
   if (!process.env.GITHUB_STEP_SUMMARY) return;
   fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "```\n" + text + "\n```\n");
@@ -638,6 +670,7 @@ if (require.main === module) {
     const out = buildReport(report, error);
     console.log(out.text);
     writeJobSummary(out);
+    await saveRun(report, out.status, error);
     try {
       await sendEmail(out);
     } catch (err) {
