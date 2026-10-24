@@ -30,6 +30,7 @@ class MainActivity : AppCompatActivity() {
     private val codeRepository = CodeRepository()
     private val channelRepository = ChannelRepository()
     private val presenceRepository = PresenceRepository()
+    private val pairingRepository = PairingRepository()
     private lateinit var sessionManager: SessionManager
 
     private var session: UserSession? = null
@@ -51,8 +52,49 @@ class MainActivity : AppCompatActivity() {
     private var presenceRunnable: Runnable? = null
     private var channelRefreshRunnable: Runnable? = null
 
+    // Reintentos del canal que se está viendo cuando falla. Antes se
+    // reintentaba cada 3 segundos para siempre y la pantalla se quedaba
+    // en negro sin explicación.
+    private var playbackRetries = 0
+    private var retryRunnable: Runnable? = null
+
+    // Para salir de la app hay que pulsar "atrás" dos veces seguidas:
+    // así un toque sin querer al cambiar de canal no la cierra.
+    private var lastBackPressAt = 0L
+
+    // ---- Caché del catálogo ----
+    // Última versión del catálogo (y de la lista vinculada) con la que se
+    // cargaron los canales. Cada minuto se pregunta solo la versión y se
+    // recargan los canales únicamente si ha cambiado.
+    private var knownCatalogVersion: Long? = null
+    private var knownPairingUpdatedAt: String? = null
+    // false si el servidor todavía no tiene la función bt_catalog_version
+    // (SQL sin ejecutar): entonces se recarga todo cada 5 minutos, como antes.
+    private var catalogVersionSupported = true
+    private var lastFullLoadAt = 0L
+    // Para no lanzar una recarga encima de otra que todavía no ha terminado.
+    private var catalogRefreshInProgress = false
+
+    // ---- Vinculación por código ----
+    // La lista vinculada que se está viendo ahora (null = lista oficial).
+    private var activePairing: PairedPlaylist? = null
+    // La última lista vinculada que dijo el servidor, se haya podido
+    // cargar o no (para no volver a "recibirla" una y otra vez).
+    private var serverPairing: PairedPlaylist? = null
+    private var pairingPollRunnable: Runnable? = null
+    private var pairingPollInFlight = false
+    // Qué lista vinculada había al abrir la pantalla del código: solo una
+    // distinta cuenta como "lista nueva recibida".
+    private var pairingScreenBaseline: String? = null
+
     companion object {
-        private const val CHANNEL_REFRESH_INTERVAL_MS = 5 * 60 * 1000L // 5 minutos
+        private const val CHANNEL_REFRESH_INTERVAL_MS = 5 * 60 * 1000L // 5 minutos (si no hay versión)
+        private const val VERSION_CHECK_INTERVAL_MS = 60_000L // 1 minuto
+        private const val PAIRING_POLL_INTERVAL_MS = 5_000L
+        private const val PRESENCE_INTERVAL_MS = 20_000L
+        private const val MAX_PLAYBACK_RETRIES = 3
+        private const val PLAYBACK_RETRY_DELAY_MS = 3000L
+        private const val EXIT_CONFIRM_WINDOW_MS = 2000L
     }
 
     private lateinit var welcomeSection: View
@@ -70,6 +112,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var osdName: TextView
     private lateinit var loadingText: TextView
     private lateinit var debugInfoText: TextView
+    private lateinit var pairingSection: View
+    private lateinit var pairingCodeText: TextView
+    private lateinit var pairingStatusText: TextView
+    private lateinit var pairingLinkedText: TextView
+    private lateinit var pairingUnlinkBtn: View
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -93,12 +140,18 @@ class MainActivity : AppCompatActivity() {
         osdName = findViewById(R.id.osdName)
         loadingText = findViewById(R.id.loadingText)
         debugInfoText = findViewById(R.id.debugInfoText)
+        pairingSection = findViewById(R.id.pairingSection)
+        pairingCodeText = findViewById(R.id.pairingCodeText)
+        pairingStatusText = findViewById(R.id.pairingStatusText)
+        pairingLinkedText = findViewById(R.id.pairingLinkedText)
+        pairingUnlinkBtn = findViewById(R.id.pairingUnlinkBtn)
 
         setupWelcomeSection()
         setupLoginPanel()
         setupSignUpPanel()
         setupForgotPanel()
         setupCodeSection()
+        setupPairingSection()
         setupAdBanner()
 
         val saved = sessionManager.load()
@@ -198,12 +251,12 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             lifecycleScope.launch {
-                val result = authRepository.sendPasswordReset(email)
-                if (result is AuthResult.Failure) {
-                    showError(errorText, result.message)
+                val error = authRepository.sendPasswordReset(email)
+                if (error != null) {
+                    showError(errorText, error)
                 } else {
                     errorText.visibility = View.GONE
-                    statusText.text = "Te hemos mandado un enlace a tu correo para cambiar la contraseña."
+                    statusText.text = "Si esa cuenta existe, te hemos enviado un enlace a tu correo para cambiar la contraseña."
                     statusText.visibility = View.VISIBLE
                 }
             }
@@ -304,6 +357,180 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ===================== VINCULAR POR CÓDIGO =====================
+
+    private fun setupPairingSection() {
+        findViewById<View>(R.id.openPairingBtn).setOnClickListener { openPairingScreen() }
+        findViewById<View>(R.id.pairingCloseBtn).setOnClickListener { closePairingScreen() }
+        pairingUnlinkBtn.setOnClickListener { unlinkPairing() }
+    }
+
+    /**
+     * Abre la pantalla con el código. Mientras está abierta, cada 5
+     * segundos se pregunta si el administrador ya ha enviado una lista
+     * a ese código; cuando llega, se carga y la pantalla se cierra sola.
+     */
+    private fun openPairingScreen() {
+        val currentSession = session ?: return
+        hideChannelBrowser()
+        pairingScreenBaseline = serverPairing?.updatedAt
+        pairingCodeText.text = "…"
+        pairingStatusText.text = "Pidiendo código…"
+        updatePairingLinkedInfo()
+        pairingSection.visibility = View.VISIBLE
+        pairingSection.post {
+            val target = if (pairingUnlinkBtn.visibility == View.VISIBLE) pairingUnlinkBtn
+            else findViewById<View>(R.id.pairingCloseBtn)
+            target.requestFocus()
+        }
+
+        lifecycleScope.launch {
+            var result = pairingRepository.startPairing(currentSession)
+            if (result is PairingStartResult.Failure && isAuthError(result.httpStatus)) {
+                val renewed = renewSession(currentSession)
+                if (renewed != null) result = pairingRepository.startPairing(renewed)
+            }
+            if (pairingSection.visibility != View.VISIBLE) return@launch
+            when (result) {
+                is PairingStartResult.Success -> {
+                    pairingCodeText.text = result.code
+                    pairingStatusText.text = "Esperando la lista… La tele la recibirá sola en unos segundos."
+                    startPairingPolling()
+                }
+                is PairingStartResult.NotAvailable -> {
+                    pairingCodeText.text = "—"
+                    pairingStatusText.text = "Esta función todavía no está activada en el servidor"
+                }
+                is PairingStartResult.Failure -> {
+                    pairingCodeText.text = "—"
+                    pairingStatusText.text =
+                        "No se pudo pedir el código. (Detalle: HTTP ${result.httpStatus} — ${result.detail})"
+                }
+            }
+        }
+    }
+
+    private fun closePairingScreen() {
+        stopPairingPolling()
+        pairingSection.visibility = View.GONE
+        playerView.requestFocus()
+    }
+
+    // Muestra si ahora hay una lista vinculada y el botón para quitarla.
+    private fun updatePairingLinkedInfo() {
+        val active = activePairing
+        val onServer = serverPairing
+        when {
+            active != null -> {
+                val name = active.label?.let { "«$it»" } ?: "vinculada"
+                pairingLinkedText.text = "Ahora estás viendo la lista $name (${allChannels.size} canales)."
+                pairingLinkedText.visibility = View.VISIBLE
+                pairingUnlinkBtn.visibility = View.VISIBLE
+            }
+            onServer != null -> {
+                pairingLinkedText.text = "Hay una lista vinculada, pero no se pudo cargar. Se muestra la lista oficial."
+                pairingLinkedText.visibility = View.VISIBLE
+                pairingUnlinkBtn.visibility = View.VISIBLE
+            }
+            else -> {
+                pairingLinkedText.visibility = View.GONE
+                pairingUnlinkBtn.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun startPairingPolling() {
+        stopPairingPolling()
+        val runnable = object : Runnable {
+            override fun run() {
+                if (pairingSection.visibility != View.VISIBLE) return
+                if (!pairingPollInFlight) {
+                    pairingPollInFlight = true
+                    lifecycleScope.launch {
+                        try {
+                            pollPairingOnce()
+                        } finally {
+                            pairingPollInFlight = false
+                        }
+                    }
+                }
+                handler.postDelayed(this, PAIRING_POLL_INTERVAL_MS)
+            }
+        }
+        pairingPollRunnable = runnable
+        handler.postDelayed(runnable, PAIRING_POLL_INTERVAL_MS)
+    }
+
+    private fun stopPairingPolling() {
+        pairingPollRunnable?.let { handler.removeCallbacks(it) }
+        pairingPollRunnable = null
+    }
+
+    private suspend fun pollPairingOnce() {
+        val currentSession = session ?: return
+        var result = pairingRepository.getPairing(currentSession)
+        if (result is PairingGetResult.Failure && isAuthError(result.httpStatus)) {
+            val renewed = renewSession(currentSession) ?: return
+            result = pairingRepository.getPairing(renewed)
+        }
+        if (pairingSection.visibility != View.VISIBLE) return
+        when (result) {
+            is PairingGetResult.Linked -> {
+                // Solo cuenta como "nueva" si no es la lista que ya había al
+                // abrir esta pantalla.
+                if (result.playlist.updatedAt == pairingScreenBaseline) return
+                stopPairingPolling()
+                // Puede que la comprobación de cada minuto ya la haya cargado
+                // mientras tanto; si no, se carga ahora.
+                if (serverPairing?.updatedAt != result.playlist.updatedAt) {
+                    pairingStatusText.text = "Lista recibida. Cargando canales…"
+                    val latest = session ?: return
+                    refreshChannelsQuietly(latest, allowRetry = true)
+                }
+                closePairingScreen()
+                if (activePairing != null) {
+                    Toast.makeText(this, "Lista vinculada cargada: ${allChannels.size} canales", Toast.LENGTH_LONG).show()
+                }
+            }
+            is PairingGetResult.NotAvailable -> {
+                stopPairingPolling()
+                pairingStatusText.text = "Esta función todavía no está activada en el servidor"
+            }
+            is PairingGetResult.NotLinked, is PairingGetResult.Failure -> {
+                // Todavía nada (o fallo de red): se vuelve a preguntar en 5 segundos.
+            }
+        }
+    }
+
+    /** "Volver a la lista oficial": quita la vinculación y recarga. */
+    private fun unlinkPairing() {
+        val currentSession = session ?: return
+        pairingStatusText.text = "Volviendo a la lista oficial…"
+        lifecycleScope.launch {
+            var result = pairingRepository.unlink(currentSession)
+            if (result is PairingUnlinkResult.Failure && isAuthError(result.httpStatus)) {
+                val renewed = renewSession(currentSession)
+                if (renewed != null) result = pairingRepository.unlink(renewed)
+            }
+            when (result) {
+                is PairingUnlinkResult.Success -> {
+                    stopPairingPolling()
+                    val latest = session ?: return@launch
+                    refreshChannelsQuietly(latest, allowRetry = true)
+                    closePairingScreen()
+                    Toast.makeText(this@MainActivity, "Has vuelto a la lista oficial", Toast.LENGTH_SHORT).show()
+                }
+                is PairingUnlinkResult.NotAvailable -> {
+                    pairingStatusText.text = "Esta función todavía no está activada en el servidor"
+                }
+                is PairingUnlinkResult.Failure -> {
+                    pairingStatusText.text =
+                        "No se pudo quitar la lista. (Detalle: HTTP ${result.httpStatus} — ${result.detail})"
+                }
+            }
+        }
+    }
+
     private fun enterMainSection() {
         showOnly(mainSection)
         loadingText.visibility = View.VISIBLE
@@ -313,11 +540,11 @@ class MainActivity : AppCompatActivity() {
             playerView.player = player
             player.addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
-                    handler.postDelayed({
-                        if (currentIndex in allChannels.indices) {
-                            playChannel(currentIndex)
-                        }
-                    }, 3000)
+                    onPlaybackFailed()
+                }
+
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_READY) playbackRetries = 0
                 }
             })
         }
@@ -332,19 +559,172 @@ class MainActivity : AppCompatActivity() {
         startChannelAutoRefresh()
     }
 
+    /**
+     * Antes se descargaba la lista entera (miles de canales) cada 5
+     * minutos. Ahora cada minuto se pregunta solo el "número de versión"
+     * del catálogo (una respuesta diminuta) y los canales se vuelven a
+     * descargar únicamente si algo ha cambiado. Si el servidor todavía no
+     * tiene esa función, se sigue como antes: todo cada 5 minutos.
+     */
     private fun startChannelAutoRefresh() {
         channelRefreshRunnable?.let { handler.removeCallbacks(it) }
         val runnable = object : Runnable {
             override fun run() {
                 val currentSession = session
-                if (currentSession != null) {
-                    lifecycleScope.launch { refreshChannelsQuietly(currentSession, allowRetry = true) }
+                if (currentSession != null && !catalogRefreshInProgress) {
+                    if (catalogVersionSupported) {
+                        catalogRefreshInProgress = true
+                        lifecycleScope.launch {
+                            try {
+                                checkCatalogVersion(currentSession, allowRetry = true)
+                            } finally {
+                                catalogRefreshInProgress = false
+                            }
+                        }
+                    } else if (System.currentTimeMillis() - lastFullLoadAt >= CHANNEL_REFRESH_INTERVAL_MS - 5_000L) {
+                        catalogRefreshInProgress = true
+                        lifecycleScope.launch {
+                            try {
+                                refreshChannelsQuietly(currentSession, allowRetry = true)
+                            } finally {
+                                catalogRefreshInProgress = false
+                            }
+                        }
+                    }
                 }
-                handler.postDelayed(this, CHANNEL_REFRESH_INTERVAL_MS)
+                handler.postDelayed(this, currentRefreshInterval())
             }
         }
         channelRefreshRunnable = runnable
-        handler.postDelayed(runnable, CHANNEL_REFRESH_INTERVAL_MS)
+        handler.postDelayed(runnable, currentRefreshInterval())
+    }
+
+    private fun currentRefreshInterval(): Long =
+        if (catalogVersionSupported) VERSION_CHECK_INTERVAL_MS else CHANNEL_REFRESH_INTERVAL_MS
+
+    /**
+     * Pregunta la versión del catálogo y recarga los canales solo si ha
+     * cambiado. Con una lista vinculada en pantalla, los cambios de la
+     * lista oficial no le afectan: solo cuenta si cambia la vinculación.
+     */
+    private suspend fun checkCatalogVersion(currentSession: UserSession, allowRetry: Boolean) {
+        when (val result = pairingRepository.fetchCatalogVersion(currentSession)) {
+            is CatalogVersionResult.Success -> {
+                val versionChanged = result.version != knownCatalogVersion
+                val pairingChanged = result.pairingUpdatedAt != knownPairingUpdatedAt
+                if (pairingChanged || (versionChanged && activePairing == null)) {
+                    refreshChannelsQuietly(currentSession, allowRetry = true)
+                } else if (versionChanged) {
+                    knownCatalogVersion = result.version
+                }
+            }
+            is CatalogVersionResult.NotAvailable -> {
+                // El SQL nuevo aún no está en el servidor: recarga completa
+                // cada 5 minutos, como siempre.
+                catalogVersionSupported = false
+            }
+            is CatalogVersionResult.Failure -> {
+                if (allowRetry && isAuthError(result.httpStatus)) {
+                    val renewed = renewSession(currentSession) ?: return
+                    checkCatalogVersion(renewed, allowRetry = false)
+                }
+                // Otros fallos: silencio, se vuelve a preguntar en un minuto.
+            }
+        }
+    }
+
+    /**
+     * Trae los canales que tiene que ver esta tele: los de la lista
+     * vinculada por código si la hay (y se puede descargar), o si no los
+     * de la lista oficial. Devuelve el mismo tipo de resultado que antes
+     * para que la carga y la recarga sigan funcionando igual.
+     */
+    private suspend fun fetchActiveChannels(currentSession: UserSession): ChannelsResult {
+        // 1) La versión de ahora, para saber luego si algo ha cambiado.
+        val version = pairingRepository.fetchCatalogVersion(currentSession)
+        if (version is CatalogVersionResult.Failure && isAuthError(version.httpStatus)) {
+            return ChannelsResult.Failure(version.httpStatus, version.detail)
+        }
+
+        // 2) ¿Tiene esta tele una lista vinculada por código?
+        val pairing = pairingRepository.getPairing(currentSession)
+        if (pairing is PairingGetResult.Failure) {
+            if (isAuthError(pairing.httpStatus)) {
+                return ChannelsResult.Failure(pairing.httpStatus, pairing.detail)
+            }
+            // Si ya hay canales en pantalla no cambiamos nada por un fallo
+            // de red momentáneo: se volverá a intentar en el próximo ciclo.
+            if (allChannels.isNotEmpty()) {
+                return ChannelsResult.Failure(pairing.httpStatus, pairing.detail)
+            }
+        }
+
+        var fallbackReason: String? = null
+        if (pairing is PairingGetResult.Linked) {
+            when (val downloaded = pairingRepository.downloadPlaylist(pairing.playlist)) {
+                is PlaylistResult.Success -> {
+                    rememberCatalogVersion(version)
+                    serverPairing = pairing.playlist
+                    activePairing = pairing.playlist
+                    return ChannelsResult.Success(downloaded.channels, null)
+                }
+                is PlaylistResult.Failure -> fallbackReason = downloaded.message
+            }
+        }
+
+        // 3) Lista oficial (sin vinculación, o la vinculada ha fallado).
+        val official = channelRepository.fetchChannels(currentSession)
+        if (official is ChannelsResult.Success) {
+            rememberCatalogVersion(version)
+            when (pairing) {
+                is PairingGetResult.Linked -> serverPairing = pairing.playlist
+                is PairingGetResult.NotLinked, is PairingGetResult.NotAvailable -> serverPairing = null
+                is PairingGetResult.Failure -> Unit
+            }
+            activePairing = null
+            if (fallbackReason != null) {
+                Toast.makeText(
+                    this,
+                    "No se pudo cargar la lista vinculada: $fallbackReason Se muestra la lista oficial.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+        return official
+    }
+
+    private fun rememberCatalogVersion(version: CatalogVersionResult) {
+        lastFullLoadAt = System.currentTimeMillis()
+        when (version) {
+            is CatalogVersionResult.Success -> {
+                catalogVersionSupported = true
+                knownCatalogVersion = version.version
+                knownPairingUpdatedAt = version.pairingUpdatedAt
+            }
+            is CatalogVersionResult.NotAvailable -> catalogVersionSupported = false
+            is CatalogVersionResult.Failure -> {
+                // Sin versión conocida: la próxima comprobación recargará.
+                knownCatalogVersion = null
+            }
+        }
+    }
+
+    // Clave de "qué lista se está viendo", para saber si ha cambiado.
+    private fun activeSourceKey(): String = activePairing?.let { "vinculada:${it.updatedAt}" } ?: "oficial"
+
+    private fun isAuthError(status: Int): Boolean = status == 401 || status == 403
+
+    /** Renueva la sesión caducada y la guarda. null si no se pudo. */
+    private suspend fun renewSession(current: UserSession): UserSession? {
+        return when (val refreshed = authRepository.refreshSession(current.refreshToken)) {
+            is AuthResult.Success -> {
+                val renewed = refreshed.session.copy(hasLinkedCode = current.hasLinkedCode)
+                session = renewed
+                sessionManager.save(renewed)
+                renewed
+            }
+            is AuthResult.Failure -> null
+        }
     }
 
     private fun updateDebugInfo(loaded: Int, categoriesCount: Int, totalOnServer: Int?) {
@@ -355,10 +735,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun refreshChannelsQuietly(currentSession: UserSession, allowRetry: Boolean) {
-        when (val result = channelRepository.fetchChannels(currentSession)) {
+        val sourceBefore = activeSourceKey()
+        when (val result = fetchActiveChannels(currentSession)) {
             is ChannelsResult.Success -> {
                 val hadChannelsBefore = allChannels.isNotEmpty()
                 val playingId = allChannels.getOrNull(currentIndex)?.id
+                // Se ha pasado de la lista oficial a una vinculada (o al revés,
+                // o a otra lista vinculada): los canales son otros.
+                val sourceChanged = activeSourceKey() != sourceBefore
 
                 allChannels = result.channels
                 categories = allChannels.map { it.category }.distinct()
@@ -386,6 +770,10 @@ class MainActivity : AppCompatActivity() {
                     loadingText.visibility = View.GONE
                     playChannel(0)
                     startPresenceHeartbeat()
+                } else if (sourceChanged && allChannels.isNotEmpty()) {
+                    // Lista distinta: se empieza por su primer canal.
+                    hideChannelBrowser()
+                    playChannel(0)
                 }
             }
             is ChannelsResult.Failure -> {
@@ -409,7 +797,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun loadChannels(currentSession: UserSession, allowRetry: Boolean) {
-        when (val result = channelRepository.fetchChannels(currentSession)) {
+        when (val result = fetchActiveChannels(currentSession)) {
             is ChannelsResult.Success -> {
                 allChannels = result.channels
                 categories = allChannels.map { it.category }.distinct()
@@ -498,7 +886,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun playChannel(index: Int) {
+        playbackRetries = 0
+        startPlayback(index)
+    }
+
+    private fun startPlayback(index: Int) {
         if (index !in allChannels.indices) return
+        retryRunnable?.let { handler.removeCallbacks(it) }
         currentIndex = index
         val channel = allChannels[index]
         exoPlayer?.apply {
@@ -508,6 +902,33 @@ class MainActivity : AppCompatActivity() {
         }
         showOsd(channel)
         updatePresenceChannel(channel.id)
+    }
+
+    /**
+     * El canal no se puede reproducir: se reintenta unas pocas veces (por
+     * si es un corte momentáneo) y, si sigue fallando, se avisa en
+     * pantalla en lugar de dejarla en negro reintentando para siempre.
+     */
+    private fun onPlaybackFailed() {
+        val failedIndex = currentIndex
+        if (failedIndex !in allChannels.indices) return
+        if (playbackRetries < MAX_PLAYBACK_RETRIES) {
+            playbackRetries++
+            val runnable = Runnable {
+                if (currentIndex == failedIndex) startPlayback(failedIndex)
+            }
+            retryRunnable = runnable
+            handler.postDelayed(runnable, PLAYBACK_RETRY_DELAY_MS)
+        } else {
+            showChannelUnavailable(allChannels[failedIndex])
+        }
+    }
+
+    private fun showChannelUnavailable(channel: Channel) {
+        osdHideRunnable?.let { handler.removeCallbacks(it) }
+        osdNumber.text = ""
+        osdName.text = "${channel.name}: canal no disponible ahora. Prueba otro con CH+ / CH−."
+        osdContainer.visibility = View.VISIBLE
     }
 
     // Al cambiar de canal con el mando (CH+/CH-), nos quedamos siempre
@@ -554,6 +975,16 @@ class MainActivity : AppCompatActivity() {
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (mainSection.visibility != View.VISIBLE) return super.onKeyDown(keyCode, event)
 
+        // Con la pantalla "Vincular por código" abierta, el mando solo se
+        // mueve por sus botones; "atrás" la cierra.
+        if (pairingSection.visibility == View.VISIBLE) {
+            if (keyCode == KeyEvent.KEYCODE_BACK) {
+                closePairingScreen()
+                return true
+            }
+            return super.onKeyDown(keyCode, event)
+        }
+
         when (keyCode) {
             KeyEvent.KEYCODE_CHANNEL_UP -> { zapNext(); return true }
             KeyEvent.KEYCODE_CHANNEL_DOWN -> { zapPrevious(); return true }
@@ -562,16 +993,7 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
             KeyEvent.KEYCODE_BACK -> {
-                if (categoriesColumn.visibility == View.VISIBLE || channelsList.visibility == View.VISIBLE) {
-                    hideChannelBrowser()
-                }
-                // Antes, si se pulsaba "atrás" mientras solo se estaba
-                // viendo un canal (sin el buscador abierto), Android
-                // cerraba la aplicación entera sin avisar — esto es lo
-                // que pasaba cuando, cambiando de canal con el mando, se
-                // rozaba sin querer el botón de atrás. Ahora lo
-                // "absorbemos" siempre aquí para que nunca cierre la app
-                // sola mientras se está viendo la televisión.
+                handleBackOnMainSection()
                 return true
             }
             KeyEvent.KEYCODE_DPAD_UP -> {
@@ -600,12 +1022,33 @@ class MainActivity : AppCompatActivity() {
     // tele) nunca dejamos que cierre la aplicación sola.
     override fun onBackPressed() {
         if (mainSection.visibility == View.VISIBLE) {
-            if (categoriesColumn.visibility == View.VISIBLE || channelsList.visibility == View.VISIBLE) {
-                hideChannelBrowser()
-            }
+            handleBackOnMainSection()
             return
         }
         super.onBackPressed()
+    }
+
+    /**
+     * "Atrás" con la lista abierta la cierra. Viendo la tele, un solo
+     * toque ya no cierra la app (se rozaba sin querer al hacer zapping):
+     * hay que pulsarlo dos veces seguidas. Antes no se podía salir nunca.
+     */
+    private fun handleBackOnMainSection() {
+        if (pairingSection.visibility == View.VISIBLE) {
+            closePairingScreen()
+            return
+        }
+        if (categoriesColumn.visibility == View.VISIBLE || channelsList.visibility == View.VISIBLE) {
+            hideChannelBrowser()
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastBackPressAt < EXIT_CONFIRM_WINDOW_MS) {
+            finish()
+        } else {
+            lastBackPressAt = now
+            Toast.makeText(this, "Pulsa atrás otra vez para salir", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun onDigitEntered(digit: Int) {
@@ -640,12 +1083,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startPresenceHeartbeat() {
+        // Se quita el aviso anterior: si no, cada recarga de canales
+        // arrancaba otro más y el contador "en línea" salía inflado.
+        presenceRunnable?.let { handler.removeCallbacks(it) }
         val runnable = object : Runnable {
             override fun run() {
                 val currentSession = session ?: return
                 val channelId = allChannels.getOrNull(currentIndex)?.id
                 lifecycleScope.launch { presenceRepository.ping(currentSession, channelId) }
-                handler.postDelayed(this, 20000)
+                handler.postDelayed(this, PRESENCE_INTERVAL_MS)
             }
         }
         presenceRunnable = runnable
@@ -687,24 +1133,42 @@ class MainActivity : AppCompatActivity() {
         textView.visibility = View.VISIBLE
     }
 
+    // Con la app en segundo plano (botón Inicio) se para todo: el vídeo,
+    // los avisos de "en línea" y la recarga de canales. Antes seguían en
+    // marcha y el panel contaba como conectadas teles que no la usaban.
     override fun onStop() {
         super.onStop()
-        exoPlayer?.playWhenReady = false
+        exoPlayer?.stop()
+        retryRunnable?.let { handler.removeCallbacks(it) }
+        presenceRunnable?.let { handler.removeCallbacks(it) }
+        channelRefreshRunnable?.let { handler.removeCallbacks(it) }
+        stopPairingPolling()
     }
 
     override fun onStart() {
         super.onStart()
         if (currentIndex in allChannels.indices) {
             playChannel(currentIndex)
+            startPresenceHeartbeat()
+            startChannelAutoRefresh()
+        }
+        // Si se salió con la pantalla del código abierta, se sigue
+        // esperando la lista al volver.
+        if (::pairingSection.isInitialized && pairingSection.visibility == View.VISIBLE &&
+            pairingCodeText.text.length == 8
+        ) {
+            startPairingPolling()
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         presenceRunnable?.let { handler.removeCallbacks(it) }
+        retryRunnable?.let { handler.removeCallbacks(it) }
         osdHideRunnable?.let { handler.removeCallbacks(it) }
         numberEntryRunnable?.let { handler.removeCallbacks(it) }
         channelRefreshRunnable?.let { handler.removeCallbacks(it) }
+        stopPairingPolling()
         exoPlayer?.release()
     }
 }
