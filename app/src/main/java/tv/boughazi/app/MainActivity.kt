@@ -1,11 +1,14 @@
 package tv.boughazi.app
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.LinearInterpolator
 import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
@@ -111,6 +114,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var osdNumber: TextView
     private lateinit var osdName: TextView
     private lateinit var loadingText: TextView
+    private lateinit var loadingOverlay: View
+    private lateinit var loadingBall: View
+    private var ballSpinner: ObjectAnimator? = null
     private lateinit var debugInfoText: TextView
     private lateinit var pairingSection: View
     private lateinit var pairingCodeText: TextView
@@ -139,6 +145,8 @@ class MainActivity : AppCompatActivity() {
         osdNumber = findViewById(R.id.osdNumber)
         osdName = findViewById(R.id.osdName)
         loadingText = findViewById(R.id.loadingText)
+        loadingOverlay = findViewById(R.id.loadingOverlay)
+        loadingBall = findViewById(R.id.loadingBall)
         debugInfoText = findViewById(R.id.debugInfoText)
         pairingSection = findViewById(R.id.pairingSection)
         pairingCodeText = findViewById(R.id.pairingCodeText)
@@ -534,6 +542,7 @@ class MainActivity : AppCompatActivity() {
     private fun enterMainSection() {
         showOnly(mainSection)
         loadingText.visibility = View.VISIBLE
+        showLoadingOverlay()
         val currentSession = session ?: return
 
         exoPlayer = ExoPlayer.Builder(this).build().also { player ->
@@ -796,6 +805,33 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Pelota BH girando mientras se cargan los canales. */
+    private fun showLoadingOverlay() {
+        ballSpinner?.cancel()
+        loadingOverlay.animate().cancel()
+        loadingOverlay.alpha = 1f
+        loadingOverlay.visibility = View.VISIBLE
+        loadingBall.rotation = 0f
+        ballSpinner = ObjectAnimator.ofFloat(loadingBall, View.ROTATION, 0f, 360f).apply {
+            duration = 1600L
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = LinearInterpolator()
+            start()
+        }
+        // Red de seguridad: si algo se queda colgado, a los 20 s se quita sola.
+        loadingOverlay.postDelayed({ hideLoadingOverlay() }, 20000L)
+    }
+
+    /** Al abrirse los canales, la pelota desaparece con un fundido suave. */
+    private fun hideLoadingOverlay() {
+        if (loadingOverlay.visibility != View.VISIBLE) return
+        loadingOverlay.animate().alpha(0f).setDuration(400L).withEndAction {
+            loadingOverlay.visibility = View.GONE
+            ballSpinner?.cancel()
+            ballSpinner = null
+        }.start()
+    }
+
     private suspend fun loadChannels(currentSession: UserSession, allowRetry: Boolean) {
         when (val result = fetchActiveChannels(currentSession)) {
             is ChannelsResult.Success -> {
@@ -806,6 +842,7 @@ class MainActivity : AppCompatActivity() {
                 if (allChannels.isEmpty()) {
                     loadingText.text = "Todavía no hay canales disponibles."
                     loadingText.visibility = View.VISIBLE
+                    hideLoadingOverlay()
                     return
                 }
 
@@ -817,6 +854,7 @@ class MainActivity : AppCompatActivity() {
 
                 playChannel(0)
                 startPresenceHeartbeat()
+                hideLoadingOverlay()
             }
             is ChannelsResult.Failure -> {
                 if (allowRetry && (result.httpStatus == 401 || result.httpStatus == 403)) {
@@ -830,12 +868,14 @@ class MainActivity : AppCompatActivity() {
                         is AuthResult.Failure -> {
                             loadingText.text = "Tu sesión ha caducado. Sal de la app y vuelve a entrar con tu Gmail."
                             loadingText.visibility = View.VISIBLE
+                            hideLoadingOverlay()
                         }
                     }
                 } else {
                     loadingText.text =
                         "No se pudieron cargar los canales. (Detalle: HTTP ${result.httpStatus} — ${result.detail})"
                     loadingText.visibility = View.VISIBLE
+                    hideLoadingOverlay()
                 }
             }
         }
@@ -1163,6 +1203,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        ballSpinner?.cancel()
         presenceRunnable?.let { handler.removeCallbacks(it) }
         retryRunnable?.let { handler.removeCallbacks(it) }
         osdHideRunnable?.let { handler.removeCallbacks(it) }
