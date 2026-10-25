@@ -508,6 +508,23 @@
             android:textSize="16sp"
             android:visibility="gone" />
 
+        <!-- Pantalla de carga: pelota BH girando hasta que se abren los canales -->
+        <FrameLayout
+            android:id="@+id/loadingOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#000000"
+            android:visibility="gone">
+
+            <ImageView
+                android:id="@+id/loadingBall"
+                android:layout_width="160dp"
+                android:layout_height="160dp"
+                android:layout_gravity="center"
+                android:contentDescription="BH"
+                android:src="@drawable/app_logo" />
+        </FrameLayout>
+
         <!-- Franja de publicidad, siempre visible abajo del todo -->
         <FrameLayout
             android:id="@+id/adContainer"
