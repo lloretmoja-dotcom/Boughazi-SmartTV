@@ -1,0 +1,83 @@
+name: Aplicar cambios BH
+
+# Se ejecuta sola al subir el archivo bh-cambios.tar.gz a la raíz del
+# repositorio (o a mano: Actions → Aplicar cambios BH → Run workflow).
+# Hace cuatro cosas: coloca cada archivo en su carpeta correcta, quita los
+# que estaban mal puestos, guarda todo en "main" y lanza la compilación
+# del APK.
+on:
+  push:
+    paths:
+      - 'bh-cambios.tar.gz'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  aplicar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código del repositorio
+        uses: actions/checkout@v4
+
+      - name: Comprobar que está el paquete
+        run: |
+          if [ ! -f bh-cambios.tar.gz ]; then
+            echo "Falta bh-cambios.tar.gz en la raíz del repositorio."
+            exit 1
+          fi
+
+      - name: Colocar los archivos en su sitio
+        run: |
+          tar xzf bh-cambios.tar.gz
+          # Archivos que se subieron a una carpeta equivocada
+          rm -f app/src/main/res/mipmap-anydpi-v26/row_focus_selector.xml
+          rm -f app/src/main/res/drawable-nodpi/ic_launcher_background.xml
+          rm -f app/src/main/java/tv/boughazi/app/campo_futbol.jpg
+          find app/src/main/java -type f ! -name '*.kt' -delete
+          find app/src/main/res/mipmap-anydpi-v26 -type f ! -name 'ic_launcher.xml' -delete
+          find app/src/main/res/drawable-nodpi -type f ! -name 'campo_futbol.jpg' ! -name 'ic_launcher_foreground.png' -delete
+
+      - name: Comprobar que no falta nada
+        run: |
+          faltan=0
+          for f in \
+            app/src/main/AndroidManifest.xml \
+            app/src/main/java/tv/boughazi/app/FavoritesStore.kt \
+            app/src/main/java/tv/boughazi/app/RowAdapter.kt \
+            app/src/main/java/tv/boughazi/app/MainActivity.kt \
+            app/src/main/res/layout/activity_main.xml \
+            app/src/main/res/values/strings.xml \
+            app/src/main/res/values/colors.xml \
+            app/src/main/res/values/ic_launcher_background.xml \
+            app/src/main/res/drawable/app_logo.png \
+            app/src/main/res/drawable-nodpi/campo_futbol.jpg \
+            app/src/main/res/drawable-nodpi/ic_launcher_foreground.png \
+            app/src/main/res/drawable-xhdpi/banner.png \
+            app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          do
+            if [ ! -f "$f" ]; then echo "FALTA: $f"; faltan=1; fi
+          done
+          if [ "$faltan" = "1" ]; then exit 1; fi
+          echo "Todos los archivos están en su sitio."
+          git status --short || true
+
+      - name: Guardar los cambios en main
+        run: |
+          git config user.name "BH bot"
+          git config user.email "bh-bot@users.noreply.github.com"
+          rm -f bh-cambios.tar.gz
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No había nada que cambiar."
+          else
+            git commit -m "Aplicar cambios BH: nombre, logo, campo de fútbol, colores y favoritos"
+            git push
+          fi
+
+      - name: Lanzar la compilación del APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build-apk.yml --ref main
