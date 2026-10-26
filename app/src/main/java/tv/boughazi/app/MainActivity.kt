@@ -115,6 +115,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var osdName: TextView
     private lateinit var loadingText: TextView
     private lateinit var loadingOverlay: View
+    private lateinit var favorites: FavoritesStore
+    private val favCategory = "★ Favoritos"
     private lateinit var loadingBall: View
     private var ballSpinner: ObjectAnimator? = null
     private lateinit var debugInfoText: TextView
@@ -146,6 +148,7 @@ class MainActivity : AppCompatActivity() {
         osdName = findViewById(R.id.osdName)
         loadingText = findViewById(R.id.loadingText)
         loadingOverlay = findViewById(R.id.loadingOverlay)
+        favorites = FavoritesStore(this)
         loadingBall = findViewById(R.id.loadingBall)
         debugInfoText = findViewById(R.id.debugInfoText)
         pairingSection = findViewById(R.id.pairingSection)
@@ -757,9 +760,7 @@ class MainActivity : AppCompatActivity() {
                 categories = allChannels.map { it.category }.distinct()
                 updateDebugInfo(allChannels.size, categories.size, result.totalReportedByServer)
 
-                categoriesList.adapter = RowAdapter(
-                    categories.map { RowItem(flag = CountryFlags.flagFor(it), title = it) }
-                ) { position -> onCategorySelected(categories[position]) }
+                refreshCategoryList()
 
                 // Si la persona tiene abierta la lista de canales de un país
                 // en este momento, la volvemos a rellenar con los datos
@@ -767,7 +768,7 @@ class MainActivity : AppCompatActivity() {
                 // estar caído) o se ha añadido uno nuevo, se ve solo, sin
                 // tener que cerrar la aplicación y volver a abrirla.
                 currentlyViewedCategory
-                    ?.takeIf { it in categories && channelsList.visibility == View.VISIBLE }
+                    ?.takeIf { it in displayCategories() && channelsList.visibility == View.VISIBLE }
                     ?.let { onCategorySelected(it) }
 
                 currentIndex = playingId
@@ -846,9 +847,7 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
 
-                categoriesList.adapter = RowAdapter(
-                    categories.map { RowItem(flag = CountryFlags.flagFor(it), title = it) }
-                ) { position -> onCategorySelected(categories[position]) }
+                refreshCategoryList()
 
                 updateDebugInfo(allChannels.size, categories.size, result.totalReportedByServer)
 
@@ -881,11 +880,62 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Países + (si hay) la carpeta "★ Favoritos" arriba del todo. */
+    private fun displayCategories(): List<String> {
+        val favIds = favorites.ids()
+        val hasFavs = favIds.isNotEmpty() && allChannels.any { it.id in favIds }
+        return if (hasFavs) listOf(favCategory) + categories else categories
+    }
+
+    private fun refreshCategoryList() {
+        val cats = displayCategories()
+        categoriesList.adapter = RowAdapter(
+            cats.map {
+                if (it == favCategory) RowItem(flag = "⭐", title = "Favoritos")
+                else RowItem(flag = CountryFlags.flagFor(it), title = it)
+            }
+        ) { position -> onCategorySelected(cats[position]) }
+    }
+
+    private fun rowTitle(idx: Int, channel: Channel): String =
+        "${idx + 1}  ${if (favorites.isFavorite(channel.id)) "★ " else ""}${channel.name}"
+
     private fun onCategorySelected(category: String) {
         currentlyViewedCategory = category
-        val channelsInCategory = allChannels.filter { it.category == category }
+        val channelsInCategory = if (category == favCategory) {
+            val favIds = favorites.ids()
+            allChannels.filter { it.id in favIds }
+        } else {
+            allChannels.filter { it.category == category }
+        }
         channelsList.adapter = RowAdapter(
-            channelsInCategory.mapIndexed { idx, it -> RowItem(title = "${idx + 1}  ${it.name}") }
+            channelsInCategory.mapIndexed { idx, it -> RowItem(title = rowTitle(idx, it)) },
+            onLongSelect = { position ->
+                // OK mantenido sobre un canal: lo añade o lo quita de favoritos.
+                val chosen = channelsInCategory[position]
+                val hadFavs = displayCategories().contains(favCategory)
+                val nowFav = favorites.toggle(chosen.id)
+                android.widget.Toast.makeText(
+                    this,
+                    if (nowFav) "★ Añadido a favoritos" else "Quitado de favoritos",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+                val hasFavsNow = displayCategories().contains(favCategory)
+                if (category == favCategory) {
+                    if (hasFavsNow) {
+                        onCategorySelected(favCategory)
+                    } else {
+                        channelsList.visibility = View.GONE
+                        currentlyViewedCategory = null
+                        refreshCategoryList()
+                        categoriesList.requestFocus()
+                    }
+                } else {
+                    (channelsList.adapter as? RowAdapter)
+                        ?.updateItem(position, RowItem(title = rowTitle(position, chosen)))
+                    if (hadFavs != hasFavsNow) refreshCategoryList()
+                }
+            }
         ) { position ->
             val chosen = channelsInCategory[position]
             val flatIndex = allChannels.indexOfFirst { it.id == chosen.id }

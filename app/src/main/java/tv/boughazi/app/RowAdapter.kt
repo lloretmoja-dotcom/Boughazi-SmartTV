@@ -19,6 +19,7 @@ data class RowItem(
 
 class RowAdapter(
     private var items: List<RowItem>,
+    private val onLongSelect: ((Int) -> Unit)? = null,
     private val onSelect: (Int) -> Unit
 ) : RecyclerView.Adapter<RowAdapter.RowViewHolder>() {
 
@@ -39,19 +40,39 @@ class RowAdapter(
         holder.title.text = item.title
         holder.subtitle.text = item.subtitle
         holder.itemView.setOnClickListener { onSelect(position) }
-        holder.itemView.setOnKeyListener { _, keyCode, event ->
-            if (event.action == android.view.KeyEvent.ACTION_DOWN &&
-                (keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER || keyCode == android.view.KeyEvent.KEYCODE_ENTER)
-            ) {
-                onSelect(position)
+        val longCallback = onLongSelect
+        if (longCallback != null) {
+            // Con pulsación larga: Android distingue solo entre OK (clic)
+            // y OK mantenido (pulsación larga), tanto con mando como al tocar.
+            holder.itemView.setOnKeyListener(null)
+            holder.itemView.setOnLongClickListener {
+                longCallback(position)
                 true
-            } else {
-                false
+            }
+        } else {
+            holder.itemView.setOnLongClickListener(null)
+            holder.itemView.isLongClickable = false
+            holder.itemView.setOnKeyListener { _, keyCode, event ->
+                if (event.action == android.view.KeyEvent.ACTION_DOWN &&
+                    (keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER || keyCode == android.view.KeyEvent.KEYCODE_ENTER)
+                ) {
+                    onSelect(position)
+                    true
+                } else {
+                    false
+                }
             }
         }
     }
 
     override fun getItemCount(): Int = items.size
+
+    /** Cambia solo una fila (por ejemplo, para poner o quitar la estrella). */
+    fun updateItem(position: Int, item: RowItem) {
+        if (position !in items.indices) return
+        items = items.toMutableList().also { it[position] = item }
+        notifyItemChanged(position, "fav")
+    }
 
     fun updateItems(newItems: List<RowItem>) {
         items = newItems

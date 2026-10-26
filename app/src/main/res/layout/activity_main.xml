@@ -408,7 +408,7 @@
             android:layout_width="220dp"
             android:layout_height="match_parent"
             android:orientation="vertical"
-            android:background="#CC0B0E14"
+            android:background="#CC0B0B0B"
             android:visibility="gone">
 
             <!-- Aviso de diagnóstico: cuántos canales/países se han
@@ -458,7 +458,7 @@
             android:layout_height="match_parent"
             android:layout_gravity="start"
             android:layout_marginStart="220dp"
-            android:background="#B30B0E14"
+            android:background="#B30B0B0B"
             android:paddingTop="24dp"
             android:visibility="gone" />
 
@@ -471,7 +471,7 @@
             android:layout_marginBottom="64dp"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:background="#D0121620"
+            android:background="#D0141414"
             android:padding="16dp"
             android:visibility="gone">
 
@@ -517,6 +517,13 @@
             android:visibility="gone">
 
             <ImageView
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:contentDescription="@null"
+                android:scaleType="centerCrop"
+                android:src="@drawable/campo_futbol" />
+
+            <ImageView
                 android:id="@+id/loadingBall"
                 android:layout_width="160dp"
                 android:layout_height="160dp"
@@ -531,7 +538,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_gravity="bottom"
-            android:background="#0B0E14" />
+            android:background="#0B0B0B" />
 
         <!-- ============ VINCULAR POR CÓDIGO (Web Pairing) ============
              Pantalla que tapa todo: enseña un código grande para
@@ -544,7 +551,7 @@
             android:orientation="vertical"
             android:gravity="center"
             android:padding="48dp"
-            android:background="#F20B0E14"
+            android:background="#F20B0B0B"
             android:clickable="true"
             android:visibility="gone">
 

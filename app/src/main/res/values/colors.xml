@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg_black">#0B0E14</color>
+    <color name="bg_black">#0B0B0B</color>
     <color name="white">#EEF1F6</color>
-    <color name="muted_gray">#8B93A7</color>
-    <color name="accent_blue">#2F8FFF</color>
-    <color name="accent_orange">#FF8A2F</color>
+    <color name="muted_gray">#9A9A9A</color>
+    <color name="accent_blue">#E50914</color>
+    <color name="accent_orange">#FF4D4D</color>
     <color name="error_red">#FF4D5E</color>
 </resources>
