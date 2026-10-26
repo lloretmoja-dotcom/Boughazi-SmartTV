@@ -117,6 +117,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var loadingOverlay: View
     private lateinit var favorites: FavoritesStore
     private val favCategory = "★ Favoritos"
+    // true cuando el canal actual se eligió desde "★ Favoritos": entonces CH+,
+    // CH− y los números se mueven solo entre los favoritos.
+    private var favoritesMode = false
     private lateinit var loadingBall: View
     private var ballSpinner: ObjectAnimator? = null
     private lateinit var debugInfoText: TextView
@@ -939,6 +942,7 @@ class MainActivity : AppCompatActivity() {
         ) { position ->
             val chosen = channelsInCategory[position]
             val flatIndex = allChannels.indexOfFirst { it.id == chosen.id }
+            favoritesMode = (category == favCategory)
             if (flatIndex >= 0) playChannel(flatIndex)
             hideChannelBrowser()
         }
@@ -961,7 +965,9 @@ class MainActivity : AppCompatActivity() {
         categoriesColumn.visibility = View.VISIBLE
         val current = allChannels.getOrNull(currentIndex)
         if (current != null) {
-            onCategorySelected(current.category)
+            // Si se está viendo desde "★ Favoritos", la lista se abre ahí.
+            val inFavorites = favoritesMode && favorites.isFavorite(current.id)
+            onCategorySelected(if (inFavorites) favCategory else current.category)
             channelsList.requestFocus()
         } else {
             categoriesList.requestFocus()
@@ -1025,9 +1031,23 @@ class MainActivity : AppCompatActivity() {
     // dentro del mismo país: al llegar al último canal del país se
     // vuelve al primero (canal 1), y al revés. NO salta solo a otro
     // país — para eso hay que abrir el buscador (OK) y elegirlo a mano.
+    /**
+     * Lista por la que se mueven CH+, CH− y los números: los favoritos (de
+     * todos los países) si el canal se eligió desde "★ Favoritos"; si no,
+     * los canales del país del canal actual.
+     */
+    private fun playlistFor(channel: Channel): List<Channel> {
+        if (favoritesMode) {
+            val favIds = favorites.ids()
+            val favs = allChannels.filter { it.id in favIds }
+            if (favs.any { it.id == channel.id }) return favs
+        }
+        return allChannels.filter { it.category == channel.category }
+    }
+
     private fun zapNext() {
         val current = allChannels.getOrNull(currentIndex) ?: return
-        val channelsInCategory = allChannels.filter { it.category == current.category }
+        val channelsInCategory = playlistFor(current)
         val posInCategory = channelsInCategory.indexOfFirst { it.id == current.id }
         if (posInCategory < 0 || channelsInCategory.isEmpty()) return
         val nextChannel = channelsInCategory[(posInCategory + 1) % channelsInCategory.size]
@@ -1037,7 +1057,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun zapPrevious() {
         val current = allChannels.getOrNull(currentIndex) ?: return
-        val channelsInCategory = allChannels.filter { it.category == current.category }
+        val channelsInCategory = playlistFor(current)
         val posInCategory = channelsInCategory.indexOfFirst { it.id == current.id }
         if (posInCategory < 0 || channelsInCategory.isEmpty()) return
         val prevChannel = channelsInCategory[(posInCategory - 1 + channelsInCategory.size) % channelsInCategory.size]
@@ -1050,7 +1070,7 @@ class MainActivity : AppCompatActivity() {
         // (empieza en 1 en cada país), no el número global guardado en la
         // base de datos. Así, si se borra un canal, los demás se corren
         // solos y no quedan huecos.
-        val posInCategory = allChannels.filter { it.category == channel.category }
+        val posInCategory = playlistFor(channel)
             .indexOfFirst { it.id == channel.id } + 1
         osdNumber.text = posInCategory.toString()
         osdName.text = channel.name
@@ -1160,8 +1180,8 @@ class MainActivity : AppCompatActivity() {
         // El número tecleado es la posición dentro del país del canal que
         // se está viendo ahora mismo (cada país empieza a contar desde 1),
         // no el número global guardado en la base de datos.
-        val currentCategory = allChannels.getOrNull(currentIndex)?.category
-        val channelsInCategory = allChannels.filter { it.category == currentCategory }
+        val currentChannel = allChannels.getOrNull(currentIndex)
+        val channelsInCategory = if (currentChannel != null) playlistFor(currentChannel) else emptyList<Channel>()
         val chosen = channelsInCategory.getOrNull(typed - 1)
         val index = if (chosen != null) allChannels.indexOfFirst { it.id == chosen.id } else -1
         if (index >= 0) {

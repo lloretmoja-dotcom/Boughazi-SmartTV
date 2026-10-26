@@ -408,7 +408,7 @@
             android:layout_width="220dp"
             android:layout_height="match_parent"
             android:orientation="vertical"
-            android:background="#CC0B0B0B"
+            android:background="#000000"
             android:visibility="gone">
 
             <!-- Aviso de diagnóstico: cuántos canales/países se han
@@ -458,7 +458,7 @@
             android:layout_height="match_parent"
             android:layout_gravity="start"
             android:layout_marginStart="220dp"
-            android:background="#B30B0B0B"
+            android:background="#0D0D0D"
             android:paddingTop="24dp"
             android:visibility="gone" />
 
