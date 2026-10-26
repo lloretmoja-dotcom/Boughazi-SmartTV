@@ -77,7 +77,15 @@ jobs:
             git push
           fi
 
-      - name: Lanzar la compilación del APK
+      - name: Cancelar compilaciones antiguas y lanzar la nueva
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run build-apk.yml --ref main
+        run: |
+          # Al subir el paquete, GitHub ya había empezado a compilar el código
+          # de ANTES de aplicar los cambios. Se cancela para que no se pise
+          # con el APK nuevo.
+          for estado in in_progress queued; do
+            gh run list --workflow build-apk.yml --status "$estado" --json databaseId --jq '.[].databaseId' \
+              | xargs -r -n1 gh run cancel || true
+          done
+          gh workflow run build-apk.yml --ref main
