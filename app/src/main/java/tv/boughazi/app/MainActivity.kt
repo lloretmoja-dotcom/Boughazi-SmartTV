@@ -10,9 +10,11 @@ import android.view.View
 import android.view.WindowManager
 import android.view.animation.LinearInterpolator
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -128,6 +130,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pairingStatusText: TextView
     private lateinit var pairingLinkedText: TextView
     private lateinit var pairingUnlinkBtn: View
+    private lateinit var topNavBar: View
+    private lateinit var moviesSection: View
+    private lateinit var navInicio: ImageView
+    private lateinit var navPeliculas: ImageView
+    private lateinit var navCanales: ImageView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -159,6 +166,11 @@ class MainActivity : AppCompatActivity() {
         pairingStatusText = findViewById(R.id.pairingStatusText)
         pairingLinkedText = findViewById(R.id.pairingLinkedText)
         pairingUnlinkBtn = findViewById(R.id.pairingUnlinkBtn)
+        topNavBar = findViewById(R.id.topNavBar)
+        moviesSection = findViewById(R.id.moviesSection)
+        navInicio = findViewById(R.id.navInicio)
+        navPeliculas = findViewById(R.id.navPeliculas)
+        navCanales = findViewById(R.id.navCanales)
 
         setupWelcomeSection()
         setupLoginPanel()
@@ -166,6 +178,7 @@ class MainActivity : AppCompatActivity() {
         setupForgotPanel()
         setupCodeSection()
         setupPairingSection()
+        setupTopNav()
         setupAdBanner()
 
         val saved = sessionManager.load()
@@ -374,7 +387,6 @@ class MainActivity : AppCompatActivity() {
     // ===================== VINCULAR POR CÓDIGO =====================
 
     private fun setupPairingSection() {
-        findViewById<View>(R.id.openPairingBtn).setOnClickListener { openPairingScreen() }
         findViewById<View>(R.id.pairingCloseBtn).setOnClickListener { closePairingScreen() }
         pairingUnlinkBtn.setOnClickListener { unlinkPairing() }
     }
@@ -950,8 +962,62 @@ class MainActivity : AppCompatActivity() {
         channelsList.requestFocus()
     }
 
+    // ===================== BARRA SUPERIOR + PELÍCULAS =====================
+
+    private fun setupTopNav() {
+        navInicio.setOnClickListener { goHome() }
+        navPeliculas.setOnClickListener { showMovies() }
+        navCanales.setOnClickListener { showChannelBrowser() }
+        updateTopNav()
+    }
+
+    private fun isMoviesOpen(): Boolean = moviesSection.visibility == View.VISIBLE
+
+    /**
+     * La barra de tres iconos se ve arriba cuando hay un menú abierto
+     * (países/canales o películas) y se esconde viendo la tele a
+     * pantalla completa. El icono de la zona abierta va en rojo.
+     */
+    private fun updateTopNav() {
+        val browserOpen = categoriesColumn.visibility == View.VISIBLE ||
+            channelsList.visibility == View.VISIBLE
+        val moviesOpen = isMoviesOpen()
+        topNavBar.visibility = if (browserOpen || moviesOpen) View.VISIBLE else View.GONE
+        val active = ContextCompat.getColor(this, R.color.accent_blue)
+        val idle = ContextCompat.getColor(this, R.color.muted_gray)
+        navInicio.setColorFilter(idle)
+        navPeliculas.setColorFilter(if (moviesOpen) active else idle)
+        navCanales.setColorFilter(if (browserOpen && !moviesOpen) active else idle)
+    }
+
+    /** Abre la zona de películas (de momento vacía). El vídeo se pausa. */
+    private fun showMovies() {
+        categoriesColumn.visibility = View.GONE
+        channelsList.visibility = View.GONE
+        currentlyViewedCategory = null
+        moviesSection.visibility = View.VISIBLE
+        exoPlayer?.playWhenReady = false
+        updateTopNav()
+        navPeliculas.requestFocus()
+    }
+
+    private fun hideMovies() {
+        if (!isMoviesOpen()) return
+        moviesSection.visibility = View.GONE
+        exoPlayer?.playWhenReady = true
+        updateTopNav()
+    }
+
+    /** Icono de casa: cierra todo y vuelve a la tele a pantalla completa. */
+    private fun goHome() {
+        hideMovies()
+        hideChannelBrowser()
+    }
+
     private fun showChannelBrowser() {
+        hideMovies()
         categoriesColumn.visibility = View.VISIBLE
+        updateTopNav()
         categoriesList.requestFocus()
     }
 
@@ -963,6 +1029,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun openBrowserAtCurrentChannel() {
         categoriesColumn.visibility = View.VISIBLE
+        updateTopNav()
         val current = allChannels.getOrNull(currentIndex)
         if (current != null) {
             // Si se está viendo desde "★ Favoritos", la lista se abre ahí.
@@ -978,7 +1045,8 @@ class MainActivity : AppCompatActivity() {
         categoriesColumn.visibility = View.GONE
         channelsList.visibility = View.GONE
         currentlyViewedCategory = null
-        playerView.requestFocus()
+        updateTopNav()
+        if (!isMoviesOpen()) playerView.requestFocus()
     }
 
     private fun playChannel(index: Int) {
@@ -994,7 +1062,7 @@ class MainActivity : AppCompatActivity() {
         exoPlayer?.apply {
             setMediaItem(MediaItem.fromUri(channel.streamUrl))
             prepare()
-            playWhenReady = true
+            playWhenReady = !isMoviesOpen()
         }
         showOsd(channel)
         updatePresenceChannel(channel.id)
@@ -1095,6 +1163,20 @@ class MainActivity : AppCompatActivity() {
             return super.onKeyDown(keyCode, event)
         }
 
+        // Zona de películas abierta: "atrás" y menú vuelven a la tele;
+        // los botones de canal y los números no hacen nada aquí.
+        if (isMoviesOpen()) {
+            when (keyCode) {
+                KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_GUIDE -> {
+                    goHome()
+                    return true
+                }
+                KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_CHANNEL_DOWN -> return true
+                in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> return true
+            }
+            return super.onKeyDown(keyCode, event)
+        }
+
         when (keyCode) {
             KeyEvent.KEYCODE_CHANNEL_UP -> { zapNext(); return true }
             KeyEvent.KEYCODE_CHANNEL_DOWN -> { zapPrevious(); return true }
@@ -1146,6 +1228,10 @@ class MainActivity : AppCompatActivity() {
     private fun handleBackOnMainSection() {
         if (pairingSection.visibility == View.VISIBLE) {
             closePairingScreen()
+            return
+        }
+        if (isMoviesOpen()) {
+            goHome()
             return
         }
         if (categoriesColumn.visibility == View.VISIBLE || channelsList.visibility == View.VISIBLE) {
@@ -1259,6 +1345,7 @@ class MainActivity : AppCompatActivity() {
         super.onStart()
         if (currentIndex in allChannels.indices) {
             playChannel(currentIndex)
+            if (isMoviesOpen()) exoPlayer?.playWhenReady = false
             startPresenceHeartbeat()
             startChannelAutoRefresh()
         }

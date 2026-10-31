@@ -25,6 +25,7 @@ object CountryFlags {
         "usa" to "US",
         "eeuu" to "US",
         "inglaterra" to "GB",
+        "kosovo" to "XK",
     )
 
     private val codeByName: Map<String, String> by lazy {

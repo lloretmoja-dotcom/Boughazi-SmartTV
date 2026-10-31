@@ -407,6 +407,7 @@
             android:id="@+id/categoriesColumn"
             android:layout_width="220dp"
             android:layout_height="match_parent"
+            android:layout_marginTop="56dp"
             android:orientation="vertical"
             android:background="#000000"
             android:visibility="gone">
@@ -425,30 +426,14 @@
                 android:textSize="14sp"
                 android:visibility="gone" />
 
-            <!-- Abre la pantalla "Vincular por código". Está arriba del
-                 todo de la columna: desde el primer país, pulsando
-                 "arriba" en el mando se llega a este botón. -->
-            <Button
-                android:id="@+id/openPairingBtn"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:layout_marginStart="8dp"
-                android:layout_marginEnd="8dp"
-                android:text="Vincular por código"
-                android:textAllCaps="false"
-                android:background="@drawable/text_button_selector"
-                android:textColor="@color/accent_orange"
-                android:focusable="true"
-                android:focusableInTouchMode="true"
-                android:nextFocusDown="@id/categoriesList" />
-
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/categoriesList"
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
                 android:layout_weight="1"
-                android:paddingTop="8dp" />
+                android:paddingTop="8dp"
+                android:clipToPadding="false"
+                android:nextFocusUp="@id/navCanales" />
         </LinearLayout>
 
         <!-- Canales de la categoría elegida -->
@@ -458,9 +443,113 @@
             android:layout_height="match_parent"
             android:layout_gravity="start"
             android:layout_marginStart="220dp"
+            android:layout_marginTop="56dp"
             android:background="#0D0D0D"
             android:paddingTop="24dp"
+            android:clipToPadding="false"
+            android:nextFocusUp="@id/navCanales"
             android:visibility="gone" />
+
+        <!-- ============ ZONA DE PELÍCULAS ============
+             Pantalla vacía (negro puro) hasta que se conecte la base de
+             datos de películas. -->
+        <FrameLayout
+            android:id="@+id/moviesSection"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:paddingTop="56dp"
+            android:background="#000000"
+            android:clickable="true"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="Películas"
+                android:textColor="@color/white"
+                android:textSize="28sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:layout_marginTop="56dp"
+                android:text="Próximamente"
+                android:textColor="@color/muted_gray"
+                android:textSize="18sp" />
+        </FrameLayout>
+
+        <!-- ============ BARRA SUPERIOR: Inicio · Películas · Canales ============
+             Aparece arriba del todo cuando se abre el menú (OK o flecha
+             arriba viendo la tele) o la zona de películas. -->
+        <LinearLayout
+            android:id="@+id/topNavBar"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_gravity="top"
+            android:orientation="horizontal"
+            android:background="#000000"
+            android:visibility="gone">
+
+            <FrameLayout
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1">
+                <ImageView
+                    android:id="@+id/navInicio"
+                    android:layout_width="72dp"
+                    android:layout_height="44dp"
+                    android:layout_gravity="center"
+                    android:padding="10dp"
+                    android:src="@drawable/ic_nav_home"
+                    android:contentDescription="Inicio"
+                    android:background="@drawable/row_focus_selector"
+                    android:focusable="true"
+                    android:clickable="true"
+                    android:nextFocusRight="@id/navPeliculas"
+                    android:nextFocusDown="@id/categoriesList" />
+            </FrameLayout>
+
+            <FrameLayout
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1">
+                <ImageView
+                    android:id="@+id/navPeliculas"
+                    android:layout_width="72dp"
+                    android:layout_height="44dp"
+                    android:layout_gravity="center"
+                    android:padding="10dp"
+                    android:src="@drawable/ic_nav_movies"
+                    android:contentDescription="Películas"
+                    android:background="@drawable/row_focus_selector"
+                    android:focusable="true"
+                    android:clickable="true"
+                    android:nextFocusLeft="@id/navInicio"
+                    android:nextFocusRight="@id/navCanales" />
+            </FrameLayout>
+
+            <FrameLayout
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1">
+                <ImageView
+                    android:id="@+id/navCanales"
+                    android:layout_width="72dp"
+                    android:layout_height="44dp"
+                    android:layout_gravity="center"
+                    android:padding="10dp"
+                    android:src="@drawable/ic_nav_tv"
+                    android:contentDescription="Canales"
+                    android:background="@drawable/row_focus_selector"
+                    android:focusable="true"
+                    android:clickable="true"
+                    android:nextFocusLeft="@id/navPeliculas"
+                    android:nextFocusDown="@id/categoriesList" />
+            </FrameLayout>
+        </LinearLayout>
 
         <!-- OSD: aviso flotante al cambiar de canal -->
         <LinearLayout
