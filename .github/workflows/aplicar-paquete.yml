@@ -1,0 +1,105 @@
+name: Aplicar paquete
+
+# Se ejecuta sola al subir un archivo que empiece por "bh-cambios" a la
+# raíz del repositorio (da igual si el móvil le añade "(1)", "(2)"...), o
+# a mano: Actions → Aplicar paquete → Run workflow. Si hay varios, usa el
+# más reciente.
+# Hace cuatro cosas: coloca cada archivo en su carpeta correcta, quita los
+# que estaban mal puestos, guarda todo en "main" y lanza la compilación
+# del APK.
+on:
+  push:
+    paths:
+      - 'bh-cambios*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  aplicar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código del repositorio
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Buscar el paquete más reciente
+        run: |
+          paquete=""
+          mejor=0
+          for f in bh-cambios*; do
+            [ -f "$f" ] || continue
+            t=$(git log -1 --format=%ct -- "$f")
+            t=${t:-0}
+            if [ "$t" -ge "$mejor" ]; then mejor=$t; paquete="$f"; fi
+          done
+          if [ -z "$paquete" ]; then
+            echo "No hay ningún archivo bh-cambios* en la raíz del repositorio."
+            exit 1
+          fi
+          echo "Paquete elegido: $paquete"
+          echo "PAQUETE=$paquete" >> "$GITHUB_ENV"
+
+      - name: Colocar los archivos en su sitio
+        run: |
+          tar xzf "$PAQUETE"
+          # Archivos que se subieron a una carpeta equivocada
+          rm -f app/src/main/res/mipmap-anydpi-v26/row_focus_selector.xml
+          rm -f app/src/main/res/drawable-nodpi/ic_launcher_background.xml
+          rm -f app/src/main/java/tv/boughazi/app/campo_futbol.jpg
+          find app/src/main/java -type f ! -name '*.kt' -delete
+          find app/src/main/res/mipmap-anydpi-v26 -type f ! -name 'ic_launcher.xml' -delete
+          find app/src/main/res/drawable-nodpi -type f ! -name 'campo_futbol.jpg' ! -name 'ic_launcher_foreground.png' -delete
+
+      - name: Comprobar que no falta nada
+        run: |
+          faltan=0
+          for f in \
+            app/src/main/AndroidManifest.xml \
+            app/src/main/java/tv/boughazi/app/FavoritesStore.kt \
+            app/src/main/java/tv/boughazi/app/RowAdapter.kt \
+            app/src/main/java/tv/boughazi/app/MainActivity.kt \
+            app/src/main/res/layout/activity_main.xml \
+            app/src/main/res/values/strings.xml \
+            app/src/main/res/values/colors.xml \
+            app/src/main/res/values/ic_launcher_background.xml \
+            app/src/main/res/drawable/app_logo.png \
+            app/src/main/res/drawable-nodpi/campo_futbol.jpg \
+            app/src/main/res/drawable-nodpi/ic_launcher_foreground.png \
+            app/src/main/res/drawable-xhdpi/banner.png \
+            app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          do
+            if [ ! -f "$f" ]; then echo "FALTA: $f"; faltan=1; fi
+          done
+          if [ "$faltan" = "1" ]; then exit 1; fi
+          echo "Todos los archivos están en su sitio."
+          git status --short || true
+
+      - name: Guardar los cambios en main
+        run: |
+          git config user.name "BH bot"
+          git config user.email "bh-bot@users.noreply.github.com"
+          rm -f bh-cambios*
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No había nada que cambiar."
+          else
+            git commit -m "Aplicar paquete de cambios"
+            git push
+          fi
+
+      - name: Cancelar compilaciones antiguas y lanzar la nueva
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Al subir el paquete, GitHub ya había empezado a compilar el código
+          # de ANTES de aplicar los cambios. Se cancela para que no se pise
+          # con el APK nuevo.
+          for estado in in_progress queued; do
+            gh run list --workflow build-apk.yml --status "$estado" --json databaseId --jq '.[].databaseId' \
+              | xargs -r -n1 gh run cancel || true
+          done
+          gh workflow run build-apk.yml --ref main
