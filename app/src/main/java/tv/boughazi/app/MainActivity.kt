@@ -130,6 +130,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pairingStatusText: TextView
     private lateinit var pairingLinkedText: TextView
     private lateinit var pairingUnlinkBtn: View
+    private val updateManager by lazy { UpdateManager(this) }
     private lateinit var topNavBar: View
     private lateinit var moviesSection: View
     private lateinit var navInicio: ImageView
@@ -583,6 +584,10 @@ class MainActivity : AppCompatActivity() {
             loadingText.text = "Cargando canales…"
             loadChannels(currentSession, allowRetry = true)
         }
+
+        // Actualizador: pregunta a Supabase si hay una versión publicada
+        // más nueva. Va aparte y no bloquea la carga de canales.
+        lifecycleScope.launch { updateManager.checkAndPrompt() }
         startChannelAutoRefresh()
     }
 
@@ -1360,6 +1365,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        updateManager.dismiss()
         ballSpinner?.cancel()
         presenceRunnable?.let { handler.removeCallbacks(it) }
         retryRunnable?.let { handler.removeCallbacks(it) }
