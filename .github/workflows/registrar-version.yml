@@ -1,0 +1,94 @@
+name: Registrar versión
+
+# Se ejecuta sola cada vez que termina bien una "Compilar APK de
+# Boughazi.tv". Hace dos cosas:
+#   1. Guarda el APK en su propio enlace (una "release" v<número>), para
+#      que cada versión conserve el suyo y no se pise con la siguiente.
+#   2. Apunta esa versión en Supabase como "pendiente". Hasta que tú la
+#      pases a "publicada", ninguna app de la gente la ve.
+# También se puede lanzar a mano: Actions → Registrar versión → Run
+# workflow, escribiendo el número de una compilación que ya exista.
+on:
+  workflow_run:
+    workflows: ["Compilar APK de Boughazi.tv"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      numero_compilacion:
+        description: "Número de la compilación (por ejemplo 102)"
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  registrar:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SUPABASE_URL: https://oansihwqjcfjackfhgbd.supabase.co
+      # Clave pública (la misma que ya lleva la app). La seguridad real la
+      # da el secreto de abajo, que solo permite apuntar versiones pendientes.
+      SUPABASE_KEY: sb_publishable_tn7CCQaV5otb7w5nKVdGgQ_uhOQCvwa
+      REGISTRO_TOKEN: ${{ secrets.REGISTRO_VERSIONES_TOKEN }}
+      RUN_ID_EVENTO: ${{ github.event.workflow_run.id }}
+      NUMERO_EVENTO: ${{ github.event.workflow_run.run_number }}
+      NUMERO_MANUAL: ${{ github.event.inputs.numero_compilacion }}
+      NOTAS_RAW: ${{ github.event.workflow_run.head_commit.message }}
+    steps:
+      - name: Calcular número y nombre de la versión
+        run: |
+          if [ -n "$NUMERO_EVENTO" ]; then
+            NUMERO="$NUMERO_EVENTO"
+            RUN_ID="$RUN_ID_EVENTO"
+          else
+            NUMERO="$NUMERO_MANUAL"
+            RUN_ID=$(gh run list --workflow build-apk.yml --limit 200 --json databaseId,number \
+              --jq ".[] | select(.number==$NUMERO) | .databaseId")
+          fi
+          if [ -z "$RUN_ID" ]; then
+            echo "No encuentro la compilación número $NUMERO."
+            exit 1
+          fi
+          # Misma cuenta que usa la compilación: número + 100.
+          echo "CODE=$((NUMERO + 100))" >> "$GITHUB_ENV"
+          echo "NAME=1.1.$NUMERO" >> "$GITHUB_ENV"
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+          NOTAS=$(printf '%s' "$NOTAS_RAW" | head -n1)
+          if [ -z "$NOTAS" ]; then NOTAS="Versión 1.1.$NUMERO"; fi
+          echo "NOTAS=$NOTAS" >> "$GITHUB_ENV"
+
+      - name: Descargar el APK de esa compilación
+        run: |
+          gh run download "$RUN_ID" -n boughazi-apk -D apk
+          ls -la apk
+
+      - name: Guardar el APK en su propio enlace
+        run: |
+          if gh release view "v$CODE" >/dev/null 2>&1; then
+            echo "La versión v$CODE ya tenía su enlace."
+          else
+            gh release create "v$CODE" apk/app-debug.apk \
+              --title "Versión $NAME" \
+              --notes "Versión $NAME. Pendiente de aprobación." \
+              --prerelease --latest=false
+          fi
+
+      - name: Apuntar la versión en Supabase como pendiente
+        run: |
+          if [ -z "$REGISTRO_TOKEN" ]; then
+            echo "::warning::Falta el secreto REGISTRO_VERSIONES_TOKEN. El APK se guardó, pero la versión no se apuntó en Supabase."
+            exit 0
+          fi
+          URL_APK="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${CODE}/app-debug.apk"
+          jq -n --arg s "$REGISTRO_TOKEN" --argjson c "$CODE" --arg n "$NAME" \
+                --arg u "$URL_APK" --arg t "$NOTAS" \
+                '{p_secreto:$s, p_code:$c, p_name:$n, p_url:$u, p_notas:$t}' > body.json
+          curl --fail-with-body -sS -X POST "$SUPABASE_URL/rest/v1/rpc/registrar_version" \
+            -H "apikey: $SUPABASE_KEY" \
+            -H "Content-Type: application/json" \
+            --data @body.json
+          echo "Versión $NAME (código $CODE) apuntada como pendiente."
