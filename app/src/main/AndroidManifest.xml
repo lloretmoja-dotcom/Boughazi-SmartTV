@@ -56,5 +56,12 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Reproductor de películas (pantalla completa). -->
+        <activity
+            android:name=".MoviePlayerActivity"
+            android:exported="false"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
     </application>
 </manifest>

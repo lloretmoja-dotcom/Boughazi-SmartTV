@@ -2,6 +2,7 @@ package tv.boughazi.app
 
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -21,6 +22,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.gms.ads.AdRequest
@@ -133,6 +135,10 @@ class MainActivity : AppCompatActivity() {
     private val updateManager by lazy { UpdateManager(this) }
     private lateinit var topNavBar: View
     private lateinit var moviesSection: View
+    private lateinit var moviesList: RecyclerView
+    private lateinit var moviesStatus: TextView
+    private lateinit var movieAdapter: MovieAdapter
+    private var moviesLoadedOnce = false
     private lateinit var navInicio: ImageView
     private lateinit var navPeliculas: ImageView
     private lateinit var navCanales: ImageView
@@ -169,6 +175,8 @@ class MainActivity : AppCompatActivity() {
         pairingUnlinkBtn = findViewById(R.id.pairingUnlinkBtn)
         topNavBar = findViewById(R.id.topNavBar)
         moviesSection = findViewById(R.id.moviesSection)
+        moviesList = findViewById(R.id.moviesList)
+        moviesStatus = findViewById(R.id.moviesStatus)
         navInicio = findViewById(R.id.navInicio)
         navPeliculas = findViewById(R.id.navPeliculas)
         navCanales = findViewById(R.id.navCanales)
@@ -180,6 +188,7 @@ class MainActivity : AppCompatActivity() {
         setupCodeSection()
         setupPairingSection()
         setupTopNav()
+        setupMovies()
         setupAdBanner()
 
         val saved = sessionManager.load()
@@ -995,7 +1004,50 @@ class MainActivity : AppCompatActivity() {
         navCanales.setColorFilter(if (browserOpen && !moviesOpen) active else idle)
     }
 
-    /** Abre la zona de películas (de momento vacía). El vídeo se pausa. */
+    // ===================== ZONA DE PELÍCULAS =====================
+
+    private fun setupMovies() {
+        // Cuántos carteles caben de lado a lado según el ancho de la pantalla.
+        val dm = resources.displayMetrics
+        val widthDp = dm.widthPixels / dm.density
+        val span = ((widthDp - 48f) / 150f).toInt().coerceIn(2, 8)
+        moviesList.layoutManager = GridLayoutManager(this, span)
+        movieAdapter = MovieAdapter(lifecycleScope) { movie ->
+            startActivity(
+                Intent(this, MoviePlayerActivity::class.java)
+                    .putExtra(MoviePlayerActivity.EXTRA_URL, movie.videoUrl)
+            )
+        }
+        moviesList.adapter = movieAdapter
+    }
+
+    /** Pide las películas a Supabase y las enseña. */
+    private fun loadMovies() {
+        moviesStatus.visibility = View.VISIBLE
+        moviesStatus.text = if (moviesLoadedOnce) "" else "Cargando películas…"
+        lifecycleScope.launch {
+            val movies = MovieRepository.fetchAll()
+            if (!isMoviesOpen()) return@launch
+            when {
+                movies == null -> {
+                    moviesStatus.text = "No se pudieron cargar las películas.\nComprueba la conexión."
+                }
+                movies.isEmpty() -> {
+                    movieAdapter.submit(emptyList())
+                    moviesStatus.text = "Todavía no hay películas.\nPróximamente."
+                }
+                else -> {
+                    moviesLoadedOnce = true
+                    movieAdapter.submit(movies)
+                    moviesStatus.visibility = View.GONE
+                    // Si el foco sigue en la barra de arriba, se queda ahí;
+                    // la persona baja con el mando hasta los carteles.
+                }
+            }
+        }
+    }
+
+    /** Abre la zona de películas. El vídeo de la tele se pausa. */
     private fun showMovies() {
         categoriesColumn.visibility = View.GONE
         channelsList.visibility = View.GONE
@@ -1004,6 +1056,7 @@ class MainActivity : AppCompatActivity() {
         exoPlayer?.playWhenReady = false
         updateTopNav()
         navPeliculas.requestFocus()
+        loadMovies()
     }
 
     private fun hideMovies() {
