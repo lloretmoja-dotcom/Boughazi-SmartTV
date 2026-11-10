@@ -2,7 +2,11 @@ package tv.boughazi.app
 
 import android.graphics.Color
 import android.os.Bundle
+import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.media3.common.MediaItem
@@ -21,6 +25,7 @@ class MoviePlayerActivity : AppCompatActivity() {
 
     private var player: ExoPlayer? = null
     private lateinit var playerView: PlayerView
+    private lateinit var errorText: TextView
     private var url: String = ""
     private var resumePosition = 0L
 
@@ -33,7 +38,21 @@ class MoviePlayerActivity : AppCompatActivity() {
             useController = true
             controllerShowTimeoutMs = 4000
         }
-        setContentView(playerView)
+        // Mensaje de error fijo en pantalla (un aviso breve se pierde en la tele).
+        errorText = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            setBackgroundColor(0xCC000000.toInt())
+            textSize = 16f
+            setPadding(32, 20, 32, 20)
+            visibility = View.GONE
+        }
+        val root = FrameLayout(this)
+        root.addView(playerView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        root.addView(errorText, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP))
+        setContentView(root)
         if (savedInstanceState != null) {
             resumePosition = savedInstanceState.getLong(KEY_POSITION, 0L)
         }
@@ -51,11 +70,15 @@ class MoviePlayerActivity : AppCompatActivity() {
         playerView.player = p
         p.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
-                Toast.makeText(
-                    this@MoviePlayerActivity,
-                    "No se pudo reproducir la película",
-                    Toast.LENGTH_LONG
-                ).show()
+                // Código del fallo y, si lo hay, la causa (por ejemplo
+                // "Response code: 403" si el servidor no deja ver el vídeo).
+                val causa = error.cause?.message?.take(120) ?: ""
+                val enlace = url.take(90)
+                errorText.text = "No se pudo reproducir la película\n" +
+                    "Motivo: ${error.errorCodeName}" +
+                    (if (causa.isNotBlank()) "\nDetalle: $causa" else "") +
+                    "\nEnlace: $enlace"
+                errorText.visibility = View.VISIBLE
             }
         })
         p.setMediaItem(MediaItem.fromUri(url))
